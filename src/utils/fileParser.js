@@ -1,5 +1,52 @@
 import * as XLSX from 'xlsx';
 
+// ─── Canonical CEF plants ─────────────────────────────────────────────────────
+// Order matches the benchmark CEF sheet's NVPG columns.
+export const CANONICAL_CEF_PLANTS = [
+  { slug: 'campia1',  pretty: 'CEF 1 CAMPIA TURZII' },
+  { slug: 'campia2',  pretty: 'CEF 2 CAMPIA TURZII' },
+  { slug: 'livezile', pretty: 'CEF LIVEZILE' },
+  { slug: 'nervia',   pretty: 'CEF 3 NERVIA' },
+  { slug: 'sotanga1', pretty: 'CEF 1 SOTANGA' },
+  { slug: 'sotanga2', pretty: 'CEF 2 SOTANGA' },
+];
+export const CEF_SLUGS = CANONICAL_CEF_PLANTS.map(p => p.slug);
+const CEF_SLUG_SET = new Set(CEF_SLUGS);
+
+/**
+ * Normalises a raw plant/column name to a canonical CEF slug, or null if it's
+ * not one of the 6 CEF plants (e.g. DSO prosumer columns, Mic Prod plants like
+ * "CEF Irum Reghin", or ENERCAST's "AGGREGATED" column).
+ */
+export function normalizePlantName(rawName) {
+  if (rawName == null) return null;
+  const s = String(rawName).toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+
+  // Exclusions: prosumer DSOs, Mic Prod plants, aggregate columns
+  if (/^(deer|delgaz|deo|rel)\b/.test(s)) return null;
+  if (/^dso\d|^ds0?4/.test(s)) return null;
+  if (/^aggregat|^agregat/.test(s)) return null;
+  if (/irum|campo verde|heckler|francomi/.test(s)) return null;
+
+  if (s.includes('livezile')) return 'livezile';
+  if (s.includes('nervia'))   return 'nervia';
+
+  const hasCampia  = s.includes('campia');
+  const hasSotanga = s.includes('sotanga');
+  const m = s.match(/cef\s*(\d)/);
+  const n = m ? m[1] : null;
+
+  if (hasSotanga) return n === '2' ? 'sotanga2' : 'sotanga1';
+  if (hasCampia)  return n === '2' ? 'campia2' : 'campia1';
+
+  // Bare "CEF 1" / "CEF 2" (AMPERMETEO, ENLITIA, … convention → Campia Turzii)
+  if (/^cef\s*1\b|^cef1\b/.test(s)) return 'campia1';
+  if (/^cef\s*2\b|^cef2\b/.test(s)) return 'campia2';
+
+  return null;
+}
+
 // ─── Forecast-type detection ──────────────────────────────────────────────────
 
 export function detectForecastType(filename) {
@@ -87,20 +134,46 @@ function sheetToRows(ws) {
   return XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
 }
 
-function sumNumericFrom(row, startIdx) {
-  let total = 0;
-  for (let i = startIdx; i < row.length; i++) {
-    const v = parseFloat(row[i]);
-    if (!isNaN(v)) total += v;
-  }
-  return total;
+// ─── Per-plant helpers ────────────────────────────────────────────────────────
+
+function emptyPerPlant() {
+  const pp = {};
+  for (const slug of CEF_SLUGS) pp[slug] = [];
+  return pp;
 }
 
-// ─── Generalized sheet parsers ────────────────────────────────────────────────
+/**
+ * Given a header row + data rows (each row = [ts_or_first_col, ...values]),
+ * and a colToSlug mapping (array aligned with row columns, values are CEF slugs
+ * or null), accumulates per-plant points and a total points series (sum of CEF
+ * slug columns only — DSO / Mic Prod / AGGREGATED columns are ignored).
+ */
+function buildFromRows(dataRows, colToSlug, getTimestamp) {
+  const points = [];
+  const perPlant = emptyPerPlant();
+
+  for (const row of dataRows) {
+    const ts = getTimestamp(row);
+    if (!ts) continue;
+    let total = 0;
+    for (let c = 0; c < colToSlug.length; c++) {
+      const slug = colToSlug[c];
+      if (!slug) continue;
+      const v = parseFloat(row[c]);
+      if (isNaN(v)) continue;
+      total += v;
+      perPlant[slug].push({ timestamp: ts, value: v });
+    }
+    points.push({ timestamp: ts, value: total });
+  }
+  return { points, perPlant };
+}
+
+// ─── Generalised sheet parsers ────────────────────────────────────────────────
 
 // Used by AMPERMETEO and SOLCAST: finds 'Data'/'Ora' header, then reads plant cols.
 function parseDataOraSheet(wb, sheetName) {
-  if (!wb.SheetNames.includes(sheetName)) return [];
+  if (!wb.SheetNames.includes(sheetName)) return { points: [], perPlant: emptyPerPlant() };
   const ws = wb.Sheets[sheetName];
   const rows = sheetToRows(ws);
 
@@ -116,104 +189,111 @@ function parseDataOraSheet(wb, sheetName) {
       break;
     }
   }
-  if (dateCol === -1) return [];
+  if (dateCol === -1) return { points: [], perPlant: emptyPerPlant() };
 
-  const pts = [];
-  for (let i = headerIdx + 1; i < rows.length; i++) {
-    const row = rows[i];
-    if (!row[dateCol]) continue;
-    const ts = parseDdMmYyyy(row[dateCol], row[timeCol]);
-    if (!ts) continue;
-    pts.push({ timestamp: ts, value: sumNumericFrom(row, plantStartCol) });
-  }
-  return pts;
+  const header = rows[headerIdx];
+  const colToSlug = header.map((v, c) => c >= plantStartCol ? normalizePlantName(v) : null);
+
+  const dataRows = rows.slice(headerIdx + 1).filter(r => r[dateCol] != null);
+  return buildFromRows(
+    dataRows,
+    colToSlug,
+    row => parseDdMmYyyy(row[dateCol], row[timeCol]),
+  );
 }
 
-// Used by ENLITIA, EUROWIND, FORESIA, METEOMATICS: timestamp in col 0, values col 1+
+// Used by ENLITIA, EUROWIND, FORESIA, METEOMATICS: timestamp in col 0, header row 0.
 function parseTimestampSheet(wb, sheetName) {
-  if (!wb.SheetNames.includes(sheetName)) return [];
+  if (!wb.SheetNames.includes(sheetName)) return { points: [], perPlant: emptyPerPlant() };
   const ws = wb.Sheets[sheetName];
   const rows = sheetToRows(ws);
-  const pts = [];
-  for (let i = 1; i < rows.length; i++) {
-    const row = rows[i];
-    if (!row[0]) continue;
-    const ts = parseTimestamp(row[0]);
-    if (!ts) continue;
-    pts.push({ timestamp: ts, value: sumNumericFrom(row, 1) });
-  }
-  return pts;
+  if (rows.length === 0) return { points: [], perPlant: emptyPerPlant() };
+
+  const header = rows[0];
+  const colToSlug = header.map((v, c) => c === 0 ? null : normalizePlantName(v));
+
+  const dataRows = rows.slice(1).filter(r => r[0] != null);
+  return buildFromRows(dataRows, colToSlug, row => parseTimestamp(row[0]));
 }
 
 // ─── Per-company parsers ──────────────────────────────────────────────────────
 
+// ADEX: 'Worksheet' sheet, row 1 = names, row 2 = codes, row 3 = series label,
+// data from row 4+. Col 0 = timestamp, cols 1-4 = DSO prosumers, cols 5-10 =
+// the 6 canonical CEF plants, col 11 = 'CEF Irum Reghin' (Mic Prod).
 function parseADEX(wb) {
   const ws = getSheet(wb, 'Worksheet');
   const rows = sheetToRows(ws);
-  const pts = [];
-  for (let i = 3; i < rows.length; i++) {
-    const row = rows[i];
-    if (!row[0]) continue;
-    const ts = parseTimestamp(row[0]);
-    if (!ts) continue;
-    pts.push({ timestamp: ts, value: sumNumericFrom(row, 1) });
-  }
-  return pts;
+  if (rows.length < 4) return { points: [], perPlant: emptyPerPlant() };
+
+  const header = rows[0];
+  const colToSlug = header.map((v, c) => c === 0 ? null : normalizePlantName(v));
+
+  const dataRows = rows.slice(3).filter(r => r[0] != null);
+  return buildFromRows(dataRows, colToSlug, row => parseTimestamp(row[0]));
 }
 
-// ENERCAST CSV: semicolon-delimited
+// ENERCAST CSV: semicolon-delimited. Header has many columns mixing CEF,
+// Mic Prod, prosumer DSOs, and an 'AGGREGATED' column. We extract only CEF
+// plant columns by name and recompute the CEF total from those.
 export function parseENERCAST_CSV(text) {
   const lines = text.trim().split('\n').filter(l => l.trim());
-  if (lines.length < 2) return { points: [], isAggregated: false };
+  if (lines.length < 2) return { points: [], perPlant: emptyPerPlant() };
 
   const headers = lines[0].split(';').map(h => h.trim());
-  const aggIdx = headers.indexOf('AGGREGATED');
   const isPerPlant = headers[0].toLowerCase().startsWith('timestamp') && headers.length <= 4;
-  const isAggregated = aggIdx !== -1;
 
-  const pts = [];
+  // Build col→slug map. For per-plant single-series files the plant name is
+  // usually in col 1 or encoded in the filename — fall back to null and rely on
+  // the single-value column 2.
+  const colToSlug = headers.map(h => normalizePlantName(h));
+
+  const points = [];
+  const perPlant = emptyPerPlant();
+
   for (let i = 1; i < lines.length; i++) {
     const cols = lines[i].split(';');
-    let ts, value;
-
+    let ts;
     if (isPerPlant) {
       ts = parseTimestamp(cols[0]);
-      value = parseFloat(cols[2]) || 0;
+      if (!ts) continue;
+      const v = parseFloat(cols[2]) || 0;
+      points.push({ timestamp: ts, value: v });
+      // single-plant file — no slug mapping available
     } else {
       ts = parseDdMmYyyy(cols[0], cols[1]);
-      if (isAggregated) {
-        value = parseFloat(cols[aggIdx]) || 0;
-      } else {
-        value = 0;
-        for (let j = 2; j < cols.length; j++) {
-          const v = parseFloat(cols[j]);
-          if (!isNaN(v)) value += v;
-        }
+      if (!ts) continue;
+      let total = 0;
+      for (let c = 0; c < colToSlug.length; c++) {
+        const slug = colToSlug[c];
+        if (!slug) continue;
+        const v = parseFloat(cols[c]);
+        if (isNaN(v)) continue;
+        total += v;
+        perPlant[slug].push({ timestamp: ts, value: v });
       }
+      points.push({ timestamp: ts, value: total });
     }
-    if (!ts) continue;
-    pts.push({ timestamp: ts, value: value || 0 });
   }
-  return { points: pts, isAggregated };
+  return { points, perPlant };
 }
 
-// METEOLOGICA PV files: sheet 'Forecast', 2 header rows, timestamp col 0, data cols 4+
+// METEOLOGICA PV files: sheet 'Forecast', 2 header rows, timestamp col 0,
+// data cols 4+. Row 1 contains plant names.
 function parseMETEOLOGICA(wb) {
   const ws = getSheet(wb, 'Forecast');
   const rows = sheetToRows(ws);
-  const pts = [];
-  for (let i = 2; i < rows.length; i++) {
-    const row = rows[i];
-    if (!row[0]) continue;
-    const ts = parseTimestamp(row[0]);
-    if (!ts) continue;
-    pts.push({ timestamp: ts, value: sumNumericFrom(row, 4) });
-  }
-  return pts;
+  if (rows.length < 3) return { points: [], perPlant: emptyPerPlant() };
+
+  const header = rows[1] ?? rows[0];
+  const colToSlug = header.map((v, c) => c < 4 ? null : normalizePlantName(v));
+
+  const dataRows = rows.slice(2).filter(r => r[0] != null);
+  return buildFromRows(dataRows, colToSlug, row => parseTimestamp(row[0]));
 }
 
-// METEOLOGICA Prosumers files: sheet 'Nova_Power_Prosumers'
-// Col 2 = "From yyyy-MM-dd HH:mm" (local start time), Col 6 = "Forecast(MWh)"
+// METEOLOGICA Prosumers files: sheet 'Nova_Power_Prosumers'.
+// Col 2 = "From yyyy-MM-dd HH:mm" (local start time), Col 6 = "Forecast(MWh)".
 function parseMETEOLOGICA_PROSUMERS(wb) {
   const ws = wb.Sheets['Nova_Power_Prosumers'];
   if (!ws) return [];
@@ -232,41 +312,44 @@ function parseMETEOLOGICA_PROSUMERS(wb) {
   return pts;
 }
 
-// OGRE: sheet 'Sheet1', single header, timestamp col 0, data cols 1+
+// OGRE: sheet 'Sheet1', single header, timestamp col 0, data cols 1+.
 function parseOGRE(wb) {
   const ws = getSheet(wb, 'Sheet1');
   const rows = sheetToRows(ws);
-  const pts = [];
-  for (let i = 1; i < rows.length; i++) {
-    const row = rows[i];
-    if (!row[0]) continue;
-    const ts = parseTimestamp(row[0]);
-    if (!ts) continue;
-    pts.push({ timestamp: ts, value: sumNumericFrom(row, 1) });
-  }
-  return pts;
+  if (rows.length === 0) return { points: [], perPlant: emptyPerPlant() };
+
+  const header = rows[0];
+  const colToSlug = header.map((v, c) => c === 0 ? null : normalizePlantName(v));
+
+  const dataRows = rows.slice(1).filter(r => r[0] != null);
+  return buildFromRows(dataRows, colToSlug, row => parseTimestamp(row[0]));
 }
 
 // ─── Main forecast file parser ────────────────────────────────────────────────
 
 /**
  * Parse a forecast file buffer.
- * Returns { cef: {points, isAggregated}, smallprod: {points, isAggregated}, prosumer: {points, isAggregated} }
+ * Returns {
+ *   cef:       { points, perPlant: { [slug]: points[] } },
+ *   smallprod: { points },
+ *   prosumer:  { points },
+ * }
  */
 export async function parseFile(company, buffer, filename) {
-  const empty = (pts = [], agg = false) => ({ points: pts, isAggregated: agg });
-  const emptyResult = { cef: empty(), smallprod: empty(), prosumer: empty() };
+  const emptyCef = () => ({ points: [], perPlant: emptyPerPlant() });
+  const emptyCat = () => ({ points: [] });
+  const emptyResult = { cef: emptyCef(), smallprod: emptyCat(), prosumer: emptyCat() };
 
   try {
     const isCsv = filename.toLowerCase().endsWith('.csv');
 
     if (isCsv) {
-      const text = new TextDecoder().decode(buffer);
       if (company === 'ENERCAST') {
-        const result = parseENERCAST_CSV(text);
-        return { cef: result, smallprod: empty(), prosumer: empty() };
+        const result = parseENERCAST_CSV(new TextDecoder().decode(buffer));
+        return { cef: result, smallprod: emptyCat(), prosumer: emptyCat() };
       }
-      // Generic CSV
+      // Generic CSV — unknown layout; aggregate only, no per-plant.
+      const text = new TextDecoder().decode(buffer);
       const lines = text.trim().split('\n');
       const sep = lines[0].includes(';') ? ';' : ',';
       const pts = [];
@@ -275,38 +358,44 @@ export async function parseFile(company, buffer, filename) {
         if (!cols[0]) continue;
         const ts = parseTimestamp(cols[0]);
         if (!ts) continue;
-        pts.push({ timestamp: ts, value: sumNumericFrom(cols, 1) });
+        let total = 0;
+        for (let c = 1; c < cols.length; c++) {
+          const v = parseFloat(cols[c]);
+          if (!isNaN(v)) total += v;
+        }
+        pts.push({ timestamp: ts, value: total });
       }
-      return { cef: empty(pts, false), smallprod: empty(), prosumer: empty() };
+      return { cef: { points: pts, perPlant: emptyPerPlant() }, smallprod: emptyCat(), prosumer: emptyCat() };
     }
 
     const wb = XLSX.read(buffer, { type: 'array', cellDates: true });
     const isProsumerFile = /prosumer/i.test(filename);
-    let cefPts = [], smallprodPts = [], prosumerPts = [];
+    let cef = emptyCef();
+    let smallprodPts = [], prosumerPts = [];
 
     switch (company) {
       case 'ADEX':
-        cefPts = parseADEX(wb);
+        cef = parseADEX(wb);
         break;
 
       case 'AMPERMETEO':
-        cefPts      = parseDataOraSheet(wb, '01_NOVA_OWNED');
-        smallprodPts = parseDataOraSheet(wb, '02_SMALL_PROD');
-        prosumerPts  = parseDataOraSheet(wb, '03_PROSUMERS');
+        cef          = parseDataOraSheet(wb, '01_NOVA_OWNED');
+        smallprodPts = parseDataOraSheet(wb, '02_SMALL_PROD').points;
+        prosumerPts  = parseDataOraSheet(wb, '03_PROSUMERS').points;
         break;
 
       case 'ENLITIA':
       case 'EUROWIND':
       case 'FORESIA':
       case 'METEOMATICS':
-        cefPts      = parseTimestampSheet(wb, '01_NOVA_OWNED');
-        smallprodPts = parseTimestampSheet(wb, '02_SMALL_PROD');
-        prosumerPts  = parseTimestampSheet(wb, '03_PROSUMERS');
+        cef          = parseTimestampSheet(wb, '01_NOVA_OWNED');
+        smallprodPts = parseTimestampSheet(wb, '02_SMALL_PROD').points;
+        prosumerPts  = parseTimestampSheet(wb, '03_PROSUMERS').points;
         break;
 
       case 'SOLCAST':
-        cefPts      = parseDataOraSheet(wb, '01_NOVA_OWNED');
-        smallprodPts = parseDataOraSheet(wb, '02_SMALL_PROD');
+        cef          = parseDataOraSheet(wb, '01_NOVA_OWNED');
+        smallprodPts = parseDataOraSheet(wb, '02_SMALL_PROD').points;
         // SOLCAST has no 03_PROSUMERS sheet
         break;
 
@@ -314,31 +403,23 @@ export async function parseFile(company, buffer, filename) {
         if (isProsumerFile) {
           prosumerPts = parseMETEOLOGICA_PROSUMERS(wb);
         } else {
-          cefPts = parseMETEOLOGICA(wb);
+          cef = parseMETEOLOGICA(wb);
         }
         break;
 
       case 'OGRE':
-        cefPts = parseOGRE(wb);
+        cef = parseOGRE(wb);
         break;
 
       default: {
-        const ws = getSheet(wb, '01_NOVA_OWNED');
-        const rows = sheetToRows(ws);
-        for (let i = 1; i < rows.length; i++) {
-          const row = rows[i];
-          if (!row[0]) continue;
-          const ts = parseTimestamp(row[0]);
-          if (!ts) continue;
-          cefPts.push({ timestamp: ts, value: sumNumericFrom(row, 1) });
-        }
+        cef = parseTimestampSheet(wb, '01_NOVA_OWNED');
       }
     }
 
     return {
-      cef:      { points: cefPts,      isAggregated: true },
-      smallprod: { points: smallprodPts, isAggregated: true },
-      prosumer:  { points: prosumerPts,  isAggregated: true },
+      cef,
+      smallprod: { points: smallprodPts },
+      prosumer:  { points: prosumerPts },
     };
   } catch (e) {
     console.warn(`[fileParser] ${filename} (${company}):`, e.message);
@@ -351,8 +432,12 @@ export async function parseFile(company, buffer, filename) {
 const BUCKET_MS = 15 * 60 * 1000;
 
 // Parse the CEF sheet from the benchmark file.
-// Returns { points, limitedTimestamps } where limitedTimestamps is Set<epoch_ms>
-// for intervals with Limitare = TRUE (must be excluded from forecast data too).
+// Returns {
+//   points, limitedTimestamps,
+//   perPlant:             { [slug]: points[] },
+//   capacityBySlug:       { [slug]: MWp },        // derived from peak × 4
+//   capacityMWhPerInterval  // Σ(MWp) × 0.25
+// }
 function parseBenchmarkCEF(wb) {
   const ws = wb.Sheets['CEF'];
   if (!ws) return null;
@@ -380,6 +465,7 @@ function parseBenchmarkCEF(wb) {
   );
   if (dateColIdx === -1) return null;
 
+  // First contiguous NVPG run only (older files had duplicate NVPG sections).
   const nvpgCols = [];
   let collecting = false;
   for (let j = 0; j < groupHeaders.length; j++) {
@@ -392,29 +478,8 @@ function parseBenchmarkCEF(wb) {
   }
   if (nvpgCols.length === 0) return null;
 
-  // ── Extract installed capacity (MWp per plant) from the header rows ──────
-  // Row at groupHeaderIdx-1 contains section labels (e.g. "NMAE - NVPG").
-  // Row at groupHeaderIdx-2 contains the corresponding numeric capacity values.
-  let plantCapacities = null;
-  if (groupHeaderIdx >= 2) {
-    const labelRow = headerRows[groupHeaderIdx - 1];
-    const valRow   = headerRows[groupHeaderIdx - 2];
-    if (labelRow && valRow) {
-      const nmaeStartCol = labelRow.findIndex(
-        v => v != null && String(v).toUpperCase().startsWith('NMAE'),
-      );
-      if (nmaeStartCol !== -1) {
-        const caps = [];
-        for (let k = 0; k < nvpgCols.length; k++) {
-          const mw = parseFloat(valRow[nmaeStartCol + k]);
-          caps.push(isNaN(mw) ? 0 : mw);
-        }
-        if (caps.some(v => v > 0)) plantCapacities = caps;
-      }
-    }
-  }
-  const totalCapacityMWp        = plantCapacities ? plantCapacities.reduce((s, v) => s + v, 0) : 0;
-  const capacityMWhPerInterval  = totalCapacityMWp > 0 ? totalCapacityMWp * 0.25 : null;
+  // Map each NVPG column to a canonical slug using its header name.
+  const colSlugs = nvpgCols.map(c => normalizePlantName(colHeaders[c]));
 
   const maxNeededCol = Math.max(dateColIdx, timeColIdx, limitareColIdx !== -1 ? limitareColIdx : 0, ...nvpgCols);
   const dataRows = XLSX.utils.sheet_to_json(ws, {
@@ -422,8 +487,10 @@ function parseBenchmarkCEF(wb) {
     range: { s: { r: groupHeaderIdx + 2, c: 0 }, e: { r: fullRange.e.r, c: maxNeededCol } },
   });
 
-  const pts = [];
+  const points = [];
   const limitedTimestamps = new Set();
+  const perPlant = emptyPerPlant();
+  const peakBySlug = {};
 
   for (const row of dataRows) {
     const dateCell = row[dateColIdx];
@@ -458,14 +525,36 @@ function parseBenchmarkCEF(wb) {
       limitedTimestamps.add(tsKey);
     }
 
-    let value = 0;
-    for (const col of nvpgCols) {
-      const v = parseFloat(row[col]);
-      if (!isNaN(v)) value += v;
+    let total = 0;
+    for (let k = 0; k < nvpgCols.length; k++) {
+      const v = parseFloat(row[nvpgCols[k]]);
+      if (isNaN(v)) continue;
+      total += v;
+      const slug = colSlugs[k];
+      if (slug) {
+        perPlant[slug].push({ timestamp: ts, value: v });
+        if (!isLimited && v > (peakBySlug[slug] ?? 0)) peakBySlug[slug] = v;
+      }
     }
-    pts.push({ timestamp: ts, value });
+    points.push({ timestamp: ts, value: total });
   }
-  return { points: pts, limitedTimestamps, plantCapacities, capacityMWhPerInterval };
+
+  // Derive MWp per plant from peak observed production:
+  //   peak_MWh_per_15min × 4 = MWp.  Excludes limited intervals so curtailed
+  //   peaks don't deflate the capacity estimate.
+  const capacityBySlug = {};
+  let totalCapacityMWp = 0;
+  for (const slug of CEF_SLUGS) {
+    const peak = peakBySlug[slug];
+    if (peak && peak > 0) {
+      const mwp = peak * 4;
+      capacityBySlug[slug] = mwp;
+      totalCapacityMWp += mwp;
+    }
+  }
+  const capacityMWhPerInterval = totalCapacityMWp > 0 ? totalCapacityMWp * 0.25 : null;
+
+  return { points, limitedTimestamps, perPlant, capacityBySlug, capacityMWhPerInterval };
 }
 
 // Parse a simple benchmark category sheet (Mic Prod or Prosumatori).
@@ -513,220 +602,34 @@ function parseBenchmarkCategorySheet(wb, sheetName) {
   return pts;
 }
 
-// ─── Per-asset metrics from benchmark CEF sheet ───────────────────────────────
-
-const BENCH_TO_CODE = {
-  'ADEX': 'ADEX', 'AMPER-METEO': 'AMPERMETEO', 'ENERCAST': 'ENERCAST',
-  'ENLITIA': 'ENLITIA', 'EUROWIND': 'EUROWIND', 'FORESIA': 'FORESIA',
-  'METEOMATICS': 'METEOMATICS', 'SOLCAST': 'SOLCAST',
-};
-
-/**
- * Reads the benchmark CEF sheet and computes NMAE per company per plant.
- * Returns { plants: string[], byCompany: { [code]: { nmae, n }[] } }
- * where each array has one entry per plant (same order as `plants`).
- */
-function parseAssetMetricsFromBenchmark(wb, plantCapacities = null) {
-  const ws = wb.Sheets['CEF'];
-  if (!ws) return null;
-
-  const fullRange = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-
-  const headerRows = XLSX.utils.sheet_to_json(ws, {
-    header: 1, defval: null,
-    range: { s: { r: 0, c: 0 }, e: { r: 5, c: fullRange.e.c } },
-  });
-
-  let groupHeaderIdx = -1;
-  for (let i = 0; i < headerRows.length; i++) {
-    if (headerRows[i].some(v => v === 'NVPG')) { groupHeaderIdx = i; break; }
-  }
-  if (groupHeaderIdx === -1) return null;
-
-  const groupHeaders = headerRows[groupHeaderIdx];
-  const colHeaders   = headerRows[groupHeaderIdx + 1];
-
-  const dateColIdx    = colHeaders.findIndex(v => v != null && String(v).trim() === 'Data');
-  const timeColIdx    = colHeaders.findIndex((v, i) => i > dateColIdx && v === 'Ora');
-  const limitareColIdx = colHeaders.findIndex(v =>
-    v != null && String(v).toLowerCase().includes('limitare'),
-  );
-  if (dateColIdx === -1) return null;
-
-  // Build map of group name → [col indices] using the FIRST contiguous run only.
-  // Some groups (e.g. ADEX) appear twice in the sheet (forecast + NMAE sections);
-  // we only want the first occurrence.
-  const groupCols = {};
-  let j2 = 0;
-  while (j2 < groupHeaders.length) {
-    if (groupHeaders[j2] == null) { j2++; continue; }
-    const gname = groupHeaders[j2];
-    if (groupCols[gname]) { j2++; continue; }   // already recorded first run
-    const cols = [];
-    while (j2 < groupHeaders.length && groupHeaders[j2] === gname) {
-      cols.push(j2++);
-    }
-    groupCols[gname] = cols;
-  }
-
-  const nvpgCols = groupCols['NVPG'];
-  if (!nvpgCols || nvpgCols.length === 0) return null;
-
-  const plantNames = nvpgCols.map(c => {
-    const h = colHeaders[c];
-    return h ? String(h).trim() : `Plant ${c}`;
-  });
-
-  // Determine which benchmark companies are present
-  const activeCompanies = Object.keys(BENCH_TO_CODE).filter(
-    bName => groupCols[bName] && groupCols[bName].length === nvpgCols.length
-  );
-
-  // Max column needed
-  const allUsedCols = [dateColIdx, timeColIdx];
-  if (limitareColIdx !== -1) allUsedCols.push(limitareColIdx);
-  allUsedCols.push(...nvpgCols);
-  for (const bn of activeCompanies) allUsedCols.push(...groupCols[bn]);
-  const maxCol = Math.max(...allUsedCols);
-
-  const dataRows = XLSX.utils.sheet_to_json(ws, {
-    header: 1, defval: null,
-    range: { s: { r: groupHeaderIdx + 2, c: 0 }, e: { r: fullRange.e.r, c: maxCol } },
-  });
-
-  // Accumulators: byCompany[code][plantIdx] = { sumAbsErr, sumNmaeDenom, n }
-  const byCompany = {};
-  for (const bn of activeCompanies) {
-    const code = BENCH_TO_CODE[bn];
-    byCompany[code] = plantNames.map(() => ({ sumAbsErr: 0, sumNmaeDenom: 0, n: 0 }));
-  }
-
-  for (const row of dataRows) {
-    const dateCell = row[dateColIdx];
-    if (!dateCell) continue;
-
-    let ts;
-    if (dateCell instanceof Date) {
-      const timeCell = timeColIdx !== -1 ? row[timeColIdx] : null;
-      if (timeCell instanceof Date) {
-        ts = new Date(
-          dateCell.getFullYear(), dateCell.getMonth(), dateCell.getDate(),
-          timeCell.getHours(), timeCell.getMinutes(), 0,
-        );
-      } else {
-        ts = dateCell;
-      }
-    } else {
-      ts = parseTimestamp(dateCell);
-    }
-    if (!ts || isNaN(ts.getTime())) continue;
-
-    const limitare = limitareColIdx !== -1 ? row[limitareColIdx] : null;
-    if (limitare === true || String(limitare).toUpperCase() === 'TRUE' || limitare === 1) continue;
-
-    const actualVals = nvpgCols.map(c => { const v = parseFloat(row[c]); return isNaN(v) ? 0 : v; });
-
-    for (const bn of activeCompanies) {
-      const code = BENCH_TO_CODE[bn];
-      const compCols = groupCols[bn];
-      for (let pi = 0; pi < nvpgCols.length; pi++) {
-        const forecast = parseFloat(row[compCols[pi]]);
-        const actual = actualVals[pi];
-        if (isNaN(forecast)) continue;
-        if (forecast === 0 && actual === 0) continue;
-        if (plantCapacities) {
-          // Capacity-normalised: denominator = plant capacity (MWp) × 0.25 h
-          byCompany[code][pi].sumAbsErr    += Math.abs(forecast - actual);
-          byCompany[code][pi].sumNmaeDenom += (plantCapacities[pi] ?? 0) * 0.25;
-          byCompany[code][pi].n++;
-        } else if (actual > 0) {
-          // Production-normalised fallback (only production intervals)
-          byCompany[code][pi].sumAbsErr    += Math.abs(forecast - actual);
-          byCompany[code][pi].sumNmaeDenom += actual;
-          byCompany[code][pi].n++;
-        }
-      }
-    }
-  }
-
-  // Compute NMAE per company per plant
-  const result = { plants: plantNames, byCompany: {} };
-  for (const [code, plantAccs] of Object.entries(byCompany)) {
-    result.byCompany[code] = plantAccs.map(acc => ({
-      nmae: acc.sumNmaeDenom > 0 ? acc.sumAbsErr / acc.sumNmaeDenom : null,
-      n:    acc.n,
-    }));
-  }
-
-  // Also parse METEOLOGICA and OGRE from their dedicated sheets (same structure:
-  // row 1 = group headers, row 2 = plant headers, data from row 3,
-  // cols 18-23 = NVPG actuals, cols 24-29 = company forecasts).
-  const COMPANY_SHEETS = [
-    { sheet: 'Meteologica ', code: 'METEOLOGICA' },
-    { sheet: 'OGRE',         code: 'OGRE' },
-  ];
-  const NVPG_START = 18;
-  const COMP_START = 24;
-  const N_PLANTS   = plantNames.length; // should be 6
-
-  for (const { sheet, code } of COMPANY_SHEETS) {
-    const csws = wb.Sheets[sheet];
-    if (!csws) continue;
-    const csRange = XLSX.utils.decode_range(csws['!ref']);
-    const csRows = XLSX.utils.sheet_to_json(csws, {
-      header: 1, defval: null,
-      range: { s: { r: 3, c: 0 }, e: { r: csRange.e.r, c: COMP_START + N_PLANTS - 1 } },
-    });
-    const accs = Array.from({ length: N_PLANTS }, () => ({ sumAbsErr: 0, sumNmaeDenom: 0, n: 0 }));
-    for (const row of csRows) {
-      for (let pi = 0; pi < N_PLANTS; pi++) {
-        const actual   = parseFloat(row[NVPG_START + pi]);
-        const forecast = parseFloat(row[COMP_START + pi]);
-        if (isNaN(actual) || isNaN(forecast)) continue;
-        if (actual === 0 && forecast === 0) continue;
-        if (plantCapacities) {
-          accs[pi].sumAbsErr    += Math.abs(forecast - actual);
-          accs[pi].sumNmaeDenom += (plantCapacities[pi] ?? 0) * 0.25;
-          accs[pi].n++;
-        } else if (actual > 0) {
-          accs[pi].sumAbsErr    += Math.abs(forecast - actual);
-          accs[pi].sumNmaeDenom += actual;
-          accs[pi].n++;
-        }
-      }
-    }
-    result.byCompany[code] = accs.map(acc => ({
-      nmae: acc.sumNmaeDenom > 0 ? acc.sumAbsErr / acc.sumNmaeDenom : null,
-      n:    acc.n,
-    }));
-  }
-
-  return result;
-}
-
 // ─── Real-data file parser ────────────────────────────────────────────────────
 
 /**
  * Parse the real-data benchmark file.
  * Returns {
- *   cef:      { points, limitedTimestamps },
+ *   cef: {
+ *     points, limitedTimestamps,
+ *     perPlant, capacityBySlug, capacityMWhPerInterval
+ *   },
  *   smallprod: { points },
  *   prosumer:  { points },
- *   assetMetrics: { plants, byCompany } | null
  * }
  */
 export async function parseRealDataFile(buffer, filename) {
   const emptyResult = {
-    cef:      { points: [], limitedTimestamps: new Set(), plantCapacities: null, capacityMWhPerInterval: null },
+    cef: {
+      points: [], limitedTimestamps: new Set(),
+      perPlant: emptyPerPlant(),
+      capacityBySlug: null, capacityMWhPerInterval: null,
+    },
     smallprod: { points: [] },
     prosumer:  { points: [] },
-    assetMetrics: null,
   };
 
   try {
     const isCsv = filename.toLowerCase().endsWith('.csv');
     if (isCsv) {
-      // Generic CSV: only CEF
+      // Generic CSV: only CEF aggregate
       const text = new TextDecoder().decode(buffer);
       const lines = text.trim().split('\n').filter(l => l.trim());
       const sep = lines[0].includes(';') ? ';' : ',';
@@ -737,9 +640,14 @@ export async function parseRealDataFile(buffer, filename) {
         let dataStart = 1;
         if (!ts) { ts = parseDdMmYyyy(cols[0], cols[1]); dataStart = 2; }
         if (!ts) continue;
-        pts.push({ timestamp: ts, value: sumNumericFrom(cols, dataStart) });
+        let total = 0;
+        for (let c = dataStart; c < cols.length; c++) {
+          const v = parseFloat(cols[c]);
+          if (!isNaN(v)) total += v;
+        }
+        pts.push({ timestamp: ts, value: total });
       }
-      return { ...emptyResult, cef: { points: pts, limitedTimestamps: new Set() } };
+      return { ...emptyResult, cef: { ...emptyResult.cef, points: pts } };
     }
 
     const wb = XLSX.read(buffer, { type: 'array', cellDates: true });
@@ -748,13 +656,7 @@ export async function parseRealDataFile(buffer, filename) {
     if (wb.SheetNames.includes('CEF')) {
       const cefResult = parseBenchmarkCEF(wb);
       if (cefResult && cefResult.points.length > 0) {
-        result.cef = {
-          points:                cefResult.points,
-          limitedTimestamps:     cefResult.limitedTimestamps,
-          plantCapacities:       cefResult.plantCapacities ?? null,
-          capacityMWhPerInterval: cefResult.capacityMWhPerInterval ?? null,
-        };
-        result.assetMetrics = parseAssetMetricsFromBenchmark(wb, cefResult.plantCapacities);
+        result.cef = cefResult;
       }
     }
 

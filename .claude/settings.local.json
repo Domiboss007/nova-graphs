@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import os; print\\('\\\\n'.join\\(os.listdir\\('/Users/megheaiani/Downloads/MAR_26'\\)\\)\\)\")",
+      "Read(//Users/megheaiani/Downloads/MAR_26/09_METEOLOGICA - M1L0/**)",
+      "Read(//private/tmp/**)",
+      "Bash(python3 -c ' *)",
+      "Bash(mdfind -name \"Power Forecast Benchmark\")",
+      "Bash(python3)"
+    ]
+  }
+}

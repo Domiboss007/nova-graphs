@@ -9,6 +9,7 @@ import {
   computeMetrics,
   computeDailyMetrics,
 } from './utils/dataProcessor.js';
+import { CANONICAL_CEF_PLANTS, CEF_SLUGS } from './utils/fileParser.js';
 import { DropZone } from './components/DropZone.jsx';
 import { DailyTotalsChart, HourlyProfileChart } from './components/EnergyChart.jsx';
 import { Leaderboard } from './components/Leaderboard.jsx';
@@ -52,12 +53,36 @@ function filterLimited(pts, limitedTimestamps) {
   });
 }
 
+function filterPerPlantLimited(perPlant, limitedTimestamps) {
+  if (!perPlant) return {};
+  if (!limitedTimestamps || limitedTimestamps.size === 0) return perPlant;
+  const out = {};
+  for (const slug of CEF_SLUGS) {
+    out[slug] = filterLimited(perPlant[slug] ?? [], limitedTimestamps);
+  }
+  return out;
+}
+
 function combinePoints(typeMap, cat) {
   const all = [];
-  for (const cats of Object.values(typeMap)) {
-    if (cats[cat]) all.push(...cats[cat]);
+  for (const typeData of Object.values(typeMap)) {
+    if (typeData[cat]) all.push(...typeData[cat]);
   }
   return all;
+}
+
+function combinePerPlant(typeMap) {
+  const out = {};
+  for (const slug of CEF_SLUGS) out[slug] = [];
+  for (const typeData of Object.values(typeMap)) {
+    const pp = typeData.cefPerPlant;
+    if (!pp) continue;
+    for (const slug of CEF_SLUGS) {
+      const pts = pp[slug];
+      if (pts && pts.length > 0) out[slug].push(...pts);
+    }
+  }
+  return out;
 }
 
 export default function App() {
@@ -89,21 +114,25 @@ export default function App() {
 
       // 2. Parse real data
       let realData = {
-        cef:      { points: [], limitedTimestamps: new Set(), plantCapacities: null, capacityMWhPerInterval: null },
+        cef: {
+          points: [], limitedTimestamps: new Set(),
+          perPlant: null, capacityBySlug: null, capacityMWhPerInterval: null,
+        },
         smallprod: { points: [] },
         prosumer:  { points: [] },
-        assetMetrics: null,
       };
       if (realFile) {
         const buf = await realFile.arrayBuffer();
         realData = await parseRealDataFile(buf, realFile.name);
       }
 
-      const limitedTs       = realData.cef.limitedTimestamps;
-      const cefActual       = realData.cef.points;
-      const cefCapacity     = realData.cef.capacityMWhPerInterval ?? null;
-      const spActual        = realData.smallprod.points;
-      const prActual        = realData.prosumer.points;
+      const limitedTs        = realData.cef.limitedTimestamps;
+      const cefActual        = realData.cef.points;
+      const cefCapacity      = realData.cef.capacityMWhPerInterval ?? null;
+      const cefActualPerPlant = realData.cef.perPlant ?? null;
+      const capacityBySlug    = realData.cef.capacityBySlug ?? null;
+      const spActual         = realData.smallprod.points;
+      const prActual         = realData.prosumer.points;
 
       // Pre-compute actual aggregations
       const cefActualDaily   = computeDailyTotals(cefActual);
@@ -121,9 +150,9 @@ export default function App() {
 
         // CEF: one block per forecast type
         for (const fType of CEF_TYPES) {
-          const cats = types[fType];
-          if (!cats) continue;
-          const raw = cats.cef || [];
+          const typeData = types[fType];
+          if (!typeData) continue;
+          const raw = typeData.cef || [];
           const pts = filterLimited(raw, limitedTs);
           if (pts.length === 0) continue;
           const dailyMets  = computeDailyMetrics(pts, cefActual, cefCapacity);
@@ -216,7 +245,34 @@ export default function App() {
       nmaeByCompany.sort((a, b) => a.nmae - b.nmae);
       rmseByCompany.sort((a, b) => a.rmse - b.rmse);
 
-      // 6. Build daily NMAE ranking (CEF, intraday + day-ahead combined, 8 companies only)
+      // 6. Per-asset (per-plant) NMAE from forecast ZIP per-plant columns matched
+      //    against the benchmark CEF per-plant actuals.
+      let assetMetrics = null;
+      if (cefActualPerPlant && capacityBySlug) {
+        const byCompany = {};
+        for (const [company, types] of Object.entries(forecastData)) {
+          const combined = combinePerPlant(types);
+          const filtered = filterPerPlantLimited(combined, limitedTs);
+          const plantRow = CANONICAL_CEF_PLANTS.map(({ slug }) => {
+            const fc = filtered[slug] ?? [];
+            const ac = cefActualPerPlant[slug] ?? [];
+            if (fc.length === 0 || ac.length === 0) return { nmae: null, n: 0 };
+            const capPerInterval = capacityBySlug[slug] != null
+              ? capacityBySlug[slug] * 0.25
+              : null;
+            const { nmae, n } = computeMetrics(fc, ac, capPerInterval);
+            return { nmae, n };
+          });
+          // Only record companies that have at least one plant with data
+          if (plantRow.some(r => r.nmae != null)) byCompany[company] = plantRow;
+        }
+        assetMetrics = {
+          plants:    CANONICAL_CEF_PLANTS.map(p => p.pretty),
+          byCompany,
+        };
+      }
+
+      // 7. Build daily NMAE ranking (CEF, intraday + day-ahead combined, 8 companies only)
       const DAILY_RANK_COS = COMPANY_ORDER.filter(c => !ANON_EXCLUDE.has(c));
       const dailyRankingRaw = {};
       for (const company of DAILY_RANK_COS) {
@@ -237,7 +293,7 @@ export default function App() {
         nmaeByCompany,
         rmseByCompany,
         perIntervalByCompany,
-        assetMetrics: realData.assetMetrics,
+        assetMetrics,
       });
       setDailyRanking(dailyRankingRaw);
     } catch (e) {
