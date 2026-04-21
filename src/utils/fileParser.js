@@ -162,7 +162,7 @@ function buildFromRows(dataRows, colToSlug, getTimestamp) {
     for (let c = 0; c < colToSlug.length; c++) {
       const slug = colToSlug[c];
       if (!slug) continue;
-      const v = parseNumber(row[c]);
+      const v = parseFloat(row[c]);
       if (isNaN(v)) continue;
       total += v;
       perPlant[slug].push({ timestamp: ts, value: v });
@@ -172,7 +172,7 @@ function buildFromRows(dataRows, colToSlug, getTimestamp) {
   return { points, perPlant };
 }
 
-// ─── Generalised sheet parsers ────────────────────────────────────────────────
+// ─── Generalised CEF sheet parsers ───────────────────────────────────────────
 
 function parseDataOraSheet(wb, sheetName) {
   if (!wb.SheetNames.includes(sheetName)) return { points: [], perPlant: emptyPerPlant() };
@@ -214,6 +214,144 @@ function parseTimestampSheet(wb, sheetName) {
 
   const dataRows = rows.slice(1).filter(r => r[0] != null);
   return buildFromRows(dataRows, colToSlug, row => parseTimestamp(row[0]));
+}
+
+// ─── SmallProd sheet parsers ──────────────────────────────────────────────────
+
+// For ENLITIA, EUROWIND, FORESIA, METEOMATICS: timestamp in col 0
+function parseSmallProdTimestampSheet(wb, sheetName) {
+  if (!wb.SheetNames.includes(sheetName)) return [];
+  const ws = wb.Sheets[sheetName];
+  const rows = sheetToRows(ws);
+  if (rows.length === 0) return [];
+  const header = rows[0];
+  const colToSp = header.map(v => isSmallProdColumn(v));
+  const dataRows = rows.slice(1).filter(r => r[0] != null);
+  const pts = [];
+  for (const row of dataRows) {
+    const ts = parseTimestamp(row[0]);
+    if (!ts) continue;
+    let total = 0;
+    for (let c = 0; c < header.length; c++) {
+      if (!colToSp[c]) continue;
+      const v = parseFloat(row[c]);
+      if (!isNaN(v)) total += v;
+    }
+    pts.push({ timestamp: ts, value: total });
+  }
+  return pts;
+}
+
+// For AMPERMETEO, SOLCAST: Data/Ora format
+function parseDataOraSmallProdSheet(wb, sheetName) {
+  if (!wb.SheetNames.includes(sheetName)) return [];
+  const ws = wb.Sheets[sheetName];
+  const rows = sheetToRows(ws);
+
+  let headerIdx = -1, dateCol = -1, timeCol = -1, plantStartCol = 5;
+  for (let i = 0; i < Math.min(rows.length, 6); i++) {
+    const dIdx = rows[i].findIndex(v => v === 'Data');
+    if (dIdx !== -1) {
+      headerIdx = i;
+      dateCol = dIdx;
+      timeCol = rows[i].findIndex((v, j) => j > dIdx && v === 'Ora');
+      plantStartCol = timeCol + 4;
+      break;
+    }
+  }
+  if (dateCol === -1) return [];
+
+  const header = rows[headerIdx];
+  const colToSp = header.map((v, c) => c >= plantStartCol ? isSmallProdColumn(v) : false);
+  const dataRows = rows.slice(headerIdx + 1).filter(r => r[dateCol] != null);
+  const pts = [];
+  for (const row of dataRows) {
+    const ts = parseDdMmYyyy(row[dateCol], row[timeCol]);
+    if (!ts) continue;
+    let total = 0;
+    for (let c = 0; c < header.length; c++) {
+      if (!colToSp[c]) continue;
+      const v = parseFloat(row[c]);
+      if (!isNaN(v)) total += v;
+    }
+    pts.push({ timestamp: ts, value: total });
+  }
+  return pts;
+}
+
+// ─── Prosumer sheet parsers ───────────────────────────────────────────────────
+
+// For ENLITIA, EUROWIND, FORESIA, METEOMATICS: timestamp in col 0
+function parseProsumerTimestampSheet(wb, sheetName) {
+  if (!wb.SheetNames.includes(sheetName)) return [];
+  const ws = wb.Sheets[sheetName];
+  const rows = sheetToRows(ws);
+  if (rows.length === 0) return [];
+  const header = rows[0];
+  const aggIdx = header.findIndex(v => v != null && /^aggregat/i.test(String(v)));
+  const colToPr = header.map(v => isProsumerColumn(v));
+  const dataRows = rows.slice(1).filter(r => r[0] != null);
+  const pts = [];
+  for (const row of dataRows) {
+    const ts = parseTimestamp(row[0]);
+    if (!ts) continue;
+    let total = 0;
+    if (aggIdx !== -1 && row[aggIdx] != null) {
+      const v = parseFloat(row[aggIdx]);
+      if (!isNaN(v)) total = v;
+    } else {
+      for (let c = 0; c < header.length; c++) {
+        if (!colToPr[c]) continue;
+        const v = parseFloat(row[c]);
+        if (!isNaN(v)) total += v;
+      }
+    }
+    pts.push({ timestamp: ts, value: total });
+  }
+  return pts;
+}
+
+// For AMPERMETEO: Data/Ora format
+function parseDataOraProsumerSheet(wb, sheetName) {
+  if (!wb.SheetNames.includes(sheetName)) return [];
+  const ws = wb.Sheets[sheetName];
+  const rows = sheetToRows(ws);
+
+  let headerIdx = -1, dateCol = -1, timeCol = -1, plantStartCol = 5;
+  for (let i = 0; i < Math.min(rows.length, 6); i++) {
+    const dIdx = rows[i].findIndex(v => v === 'Data');
+    if (dIdx !== -1) {
+      headerIdx = i;
+      dateCol = dIdx;
+      timeCol = rows[i].findIndex((v, j) => j > dIdx && v === 'Ora');
+      plantStartCol = timeCol + 4;
+      break;
+    }
+  }
+  if (dateCol === -1) return [];
+
+  const header = rows[headerIdx];
+  const aggIdx = header.findIndex((v, c) => c >= plantStartCol && v != null && /^aggregat/i.test(String(v)));
+  const colToPr = header.map((v, c) => c >= plantStartCol ? isProsumerColumn(v) : false);
+  const dataRows = rows.slice(headerIdx + 1).filter(r => r[dateCol] != null);
+  const pts = [];
+  for (const row of dataRows) {
+    const ts = parseDdMmYyyy(row[dateCol], row[timeCol]);
+    if (!ts) continue;
+    let total = 0;
+    if (aggIdx !== -1 && row[aggIdx] != null) {
+      const v = parseFloat(row[aggIdx]);
+      if (!isNaN(v)) total = v;
+    } else {
+      for (let c = 0; c < header.length; c++) {
+        if (!colToPr[c]) continue;
+        const v = parseFloat(row[c]);
+        if (!isNaN(v)) total += v;
+      }
+    }
+    pts.push({ timestamp: ts, value: total });
+  }
+  return pts;
 }
 
 // ─── Per-company parsers ──────────────────────────────────────────────────────
@@ -384,8 +522,8 @@ export async function parseFile(company, buffer, filename) {
 
       case 'AMPERMETEO':
         cef          = parseDataOraSheet(wb, '01_NOVA_OWNED');
-        smallprodPts = parseDataOraSheet(wb, '02_SMALL_PROD').points;
-        prosumerPts  = parseDataOraSheet(wb, '03_PROSUMERS').points;
+        smallprodPts = parseDataOraSmallProdSheet(wb, '02_SMALL_PROD');
+        prosumerPts  = parseDataOraProsumerSheet(wb, '03_PROSUMERS');
         break;
 
       case 'ENLITIA':
@@ -393,13 +531,13 @@ export async function parseFile(company, buffer, filename) {
       case 'FORESIA':
       case 'METEOMATICS':
         cef          = parseTimestampSheet(wb, '01_NOVA_OWNED');
-        smallprodPts = parseTimestampSheet(wb, '02_SMALL_PROD').points;
-        prosumerPts  = parseTimestampSheet(wb, '03_PROSUMERS').points;
+        smallprodPts = parseSmallProdTimestampSheet(wb, '02_SMALL_PROD');
+        prosumerPts  = parseProsumerTimestampSheet(wb, '03_PROSUMERS');
         break;
 
       case 'SOLCAST':
         cef          = parseDataOraSheet(wb, '01_NOVA_OWNED');
-        smallprodPts = parseDataOraSheet(wb, '02_SMALL_PROD').points;
+        smallprodPts = parseDataOraSmallProdSheet(wb, '02_SMALL_PROD');
         break;
 
       case 'METEOLOGICA':
