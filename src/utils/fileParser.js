@@ -3,11 +3,10 @@ import * as XLSX from 'xlsx';
 function parseNumber(v) {
   if (v == null) return NaN;
   if (typeof v === 'number') return v;
-  return parseNumber(String(v).replace(',', '.'));
+  return parseFloat(String(v).replace(',', '.'));
 }
 
 // ─── Canonical CEF plants ─────────────────────────────────────────────────────
-// Order matches the benchmark CEF sheet's NVPG columns.
 export const CANONICAL_CEF_PLANTS = [
   { slug: 'campia1',  pretty: 'CEF 1 CAMPIA TURZII' },
   { slug: 'campia2',  pretty: 'CEF 2 CAMPIA TURZII' },
@@ -19,18 +18,11 @@ export const CANONICAL_CEF_PLANTS = [
 export const CEF_SLUGS = CANONICAL_CEF_PLANTS.map(p => p.slug);
 const CEF_SLUG_SET = new Set(CEF_SLUGS);
 
-
-/**
- * Normalises a raw plant/column name to a canonical CEF slug, or null if it's
- * not one of the 6 CEF plants (e.g. DSO prosumer columns, Mic Prod plants like
- * "CEF Irum Reghin", or ENERCAST's "AGGREGATED" column).
- */
 export function normalizePlantName(rawName) {
   if (rawName == null) return null;
   const s = String(rawName).toLowerCase().replace(/\s+/g, ' ').trim();
   if (!s) return null;
 
-  // Exclusions: prosumer DSOs, Mic Prod plants, aggregate columns
   if (/^(deer|delgaz|deo|rel)\b/.test(s)) return null;
   if (/^dso\d|^ds0?4/.test(s)) return null;
   if (/^aggregat|^agregat/.test(s)) return null;
@@ -47,12 +39,12 @@ export function normalizePlantName(rawName) {
   if (hasSotanga) return n === '2' ? 'sotanga2' : 'sotanga1';
   if (hasCampia)  return n === '2' ? 'campia2' : 'campia1';
 
-  // Bare "CEF 1" / "CEF 2" (AMPERMETEO, ENLITIA, … convention → Campia Turzii)
   if (/^cef\s*1\b|^cef1\b/.test(s)) return 'campia1';
   if (/^cef\s*2\b|^cef2\b/.test(s)) return 'campia2';
 
   return null;
 }
+
 export function isSmallProdColumn(rawName) {
   if (rawName == null) return false;
   const s = String(rawName).toLowerCase().replace(/\s+/g, ' ').trim();
@@ -64,6 +56,7 @@ export function isProsumerColumn(rawName) {
   const s = String(rawName).toLowerCase().replace(/\s+/g, ' ').trim();
   return /^(deer|delgaz|deo|rel)\b/.test(s) || /^dso\d|^ds0?4/.test(s);
 }
+
 // ─── Forecast-type detection ──────────────────────────────────────────────────
 
 export function detectForecastType(filename) {
@@ -71,7 +64,6 @@ export function detectForecastType(filename) {
   return 'intraday';
 }
 
-// OGRE 1-hour aggregated duplicates are skipped; prosumer files are now parsed.
 export function shouldSkipFile(filename) {
   if (/ - 1h/i.test(filename)) return true;
   return false;
@@ -159,12 +151,6 @@ function emptyPerPlant() {
   return pp;
 }
 
-/**
- * Given a header row + data rows (each row = [ts_or_first_col, ...values]),
- * and a colToSlug mapping (array aligned with row columns, values are CEF slugs
- * or null), accumulates per-plant points and a total points series (sum of CEF
- * slug columns only — DSO / Mic Prod / AGGREGATED columns are ignored).
- */
 function buildFromRows(dataRows, colToSlug, getTimestamp) {
   const points = [];
   const perPlant = emptyPerPlant();
@@ -176,7 +162,7 @@ function buildFromRows(dataRows, colToSlug, getTimestamp) {
     for (let c = 0; c < colToSlug.length; c++) {
       const slug = colToSlug[c];
       if (!slug) continue;
-      const v = parseNumber(row[c]);
+      const v = parseFloat(row[c]);
       if (isNaN(v)) continue;
       total += v;
       perPlant[slug].push({ timestamp: ts, value: v });
@@ -188,7 +174,6 @@ function buildFromRows(dataRows, colToSlug, getTimestamp) {
 
 // ─── Generalised sheet parsers ────────────────────────────────────────────────
 
-// Used by AMPERMETEO and SOLCAST: finds 'Data'/'Ora' header, then reads plant cols.
 function parseDataOraSheet(wb, sheetName) {
   if (!wb.SheetNames.includes(sheetName)) return { points: [], perPlant: emptyPerPlant() };
   const ws = wb.Sheets[sheetName];
@@ -201,7 +186,6 @@ function parseDataOraSheet(wb, sheetName) {
       headerIdx = i;
       dateCol = dIdx;
       timeCol = rows[i].findIndex((v, j) => j > dIdx && v === 'Ora');
-      // Layout: Data, Ora, Ziua, IBD 15min, IBD 1h, [plants…]
       plantStartCol = timeCol + 4;
       break;
     }
@@ -219,7 +203,6 @@ function parseDataOraSheet(wb, sheetName) {
   );
 }
 
-// Used by ENLITIA, EUROWIND, FORESIA, METEOMATICS: timestamp in col 0, header row 0.
 function parseTimestampSheet(wb, sheetName) {
   if (!wb.SheetNames.includes(sheetName)) return { points: [], perPlant: emptyPerPlant() };
   const ws = wb.Sheets[sheetName];
@@ -235,9 +218,6 @@ function parseTimestampSheet(wb, sheetName) {
 
 // ─── Per-company parsers ──────────────────────────────────────────────────────
 
-// ADEX: 'Worksheet' sheet, row 1 = names, row 2 = codes, row 3 = series label,
-// data from row 4+. Col 0 = timestamp, cols 1-4 = DSO prosumers, cols 5-10 =
-// the 6 canonical CEF plants, col 11 = 'CEF Irum Reghin' (Mic Prod).
 function parseADEX(wb) {
   const ws = getSheet(wb, 'Worksheet');
   const rows = sheetToRows(ws);
@@ -268,9 +248,6 @@ function parseADEX(wb) {
   return { cef, smallprod: spPts, prosumer: prPts };
 }
 
-// ENERCAST CSV: semicolon-delimited. Header has many columns mixing CEF,
-// Mic Prod, prosumer DSOs, and an 'AGGREGATED' column. We extract only CEF
-// plant columns by name and recompute the CEF total from those.
 export function parseENERCAST_CSV(text) {
   const lines = text.trim().split('\n').filter(l => l.trim());
   if (lines.length < 2) return { points: [], perPlant: emptyPerPlant(), smallprod: [], prosumer: [] };
@@ -312,8 +289,6 @@ export function parseENERCAST_CSV(text) {
   return { points, perPlant, smallprod: spPoints, prosumer: prPoints };
 }
 
-// METEOLOGICA PV files: sheet 'Forecast', 2 header rows, timestamp col 0,
-// data cols 4+. Row 1 contains plant names.
 function parseMETEOLOGICA(wb) {
   const ws = getSheet(wb, 'Forecast');
   const rows = sheetToRows(ws);
@@ -326,27 +301,23 @@ function parseMETEOLOGICA(wb) {
   return buildFromRows(dataRows, colToSlug, row => parseTimestamp(row[0]));
 }
 
-// METEOLOGICA Prosumers files: sheet 'Nova_Power_Prosumers'.
-// Col 2 = "From yyyy-MM-dd HH:mm" (local start time), Col 6 = "Forecast(MWh)".
 function parseMETEOLOGICA_PROSUMERS(wb) {
   const ws = wb.Sheets['Nova_Power_Prosumers'];
   if (!ws) return [];
   const rows = sheetToRows(ws);
   const pts = [];
-  // Row 0: title, Row 1: headers, Row 2+: data
   for (let i = 2; i < rows.length; i++) {
     const row = rows[i];
     if (!row[2]) continue;
     const ts = parseTimestamp(row[2]);
     if (!ts) continue;
-    const v = parseNumber(row[6]);
+    const v = parseFloat(row[6]);
     if (isNaN(v)) continue;
     pts.push({ timestamp: ts, value: v });
   }
   return pts;
 }
 
-// OGRE: sheet 'Sheet1', single header, timestamp col 0, data cols 1+.
 function parseOGRE(wb) {
   const ws = getSheet(wb, 'Sheet1');
   const rows = sheetToRows(ws);
@@ -361,14 +332,6 @@ function parseOGRE(wb) {
 
 // ─── Main forecast file parser ────────────────────────────────────────────────
 
-/**
- * Parse a forecast file buffer.
- * Returns {
- *   cef:       { points, perPlant: { [slug]: points[] } },
- *   smallprod: { points },
- *   prosumer:  { points },
- * }
- */
 export async function parseFile(company, buffer, filename) {
   const emptyCef = () => ({ points: [], perPlant: emptyPerPlant() });
   const emptyCat = () => ({ points: [] });
@@ -380,9 +343,12 @@ export async function parseFile(company, buffer, filename) {
     if (isCsv) {
       if (company === 'ENERCAST') {
         const result = parseENERCAST_CSV(new TextDecoder().decode(buffer));
-        return { cef:       { points: result.points, perPlant: result.perPlant }, smallprod: { points: result.smallprod }, prosumer:  { points: result.prosumer }, };
+        return {
+          cef:       { points: result.points, perPlant: result.perPlant },
+          smallprod: { points: result.smallprod },
+          prosumer:  { points: result.prosumer },
+        };
       }
-      // Generic CSV — unknown layout; aggregate only, no per-plant.
       const text = new TextDecoder().decode(buffer);
       const lines = text.trim().split('\n');
       const sep = lines[0].includes(';') ? ';' : ',';
@@ -394,7 +360,7 @@ export async function parseFile(company, buffer, filename) {
         if (!ts) continue;
         let total = 0;
         for (let c = 1; c < cols.length; c++) {
-          const v = parseNumber(cols[c]);
+          const v = parseFloat(cols[c]);
           if (!isNaN(v)) total += v;
         }
         pts.push({ timestamp: ts, value: total });
@@ -408,12 +374,13 @@ export async function parseFile(company, buffer, filename) {
     let smallprodPts = [], prosumerPts = [];
 
     switch (company) {
-      case 'ADEX':
+      case 'ADEX': {
         const r = parseADEX(wb);
         cef = r.cef;
         smallprodPts = r.smallprod;
         prosumerPts  = r.prosumer;
         break;
+      }
 
       case 'AMPERMETEO':
         cef          = parseDataOraSheet(wb, '01_NOVA_OWNED');
@@ -433,7 +400,6 @@ export async function parseFile(company, buffer, filename) {
       case 'SOLCAST':
         cef          = parseDataOraSheet(wb, '01_NOVA_OWNED');
         smallprodPts = parseDataOraSheet(wb, '02_SMALL_PROD').points;
-        // SOLCAST has no 03_PROSUMERS sheet
         break;
 
       case 'METEOLOGICA':
@@ -468,13 +434,6 @@ export async function parseFile(company, buffer, filename) {
 
 const BUCKET_MS = 15 * 60 * 1000;
 
-// Parse the CEF sheet from the benchmark file.
-// Returns {
-//   points, limitedTimestamps,
-//   perPlant:             { [slug]: points[] },
-//   capacityBySlug:       { [slug]: MWp },        // derived from peak × 4
-//   capacityMWhPerInterval  // Σ(MWp) × 0.25
-// }
 function parseBenchmarkCEF(wb) {
   const ws = wb.Sheets['CEF'];
   if (!ws) return null;
@@ -502,7 +461,6 @@ function parseBenchmarkCEF(wb) {
   );
   if (dateColIdx === -1) return null;
 
-  // First contiguous NVPG run only (older files had duplicate NVPG sections).
   const nvpgCols = [];
   let collecting = false;
   for (let j = 0; j < groupHeaders.length; j++) {
@@ -515,7 +473,6 @@ function parseBenchmarkCEF(wb) {
   }
   if (nvpgCols.length === 0) return null;
 
-  // Map each NVPG column to a canonical slug using its header name.
   const colSlugs = nvpgCols.map(c => normalizePlantName(colHeaders[c]));
 
   const maxNeededCol = Math.max(dateColIdx, timeColIdx, limitareColIdx !== -1 ? limitareColIdx : 0, ...nvpgCols);
@@ -556,15 +513,12 @@ function parseBenchmarkCEF(wb) {
                       String(limitare).toUpperCase() === 'TRUE' ||
                       limitare === 1;
     if (isLimited) {
-      // Track limited timestamps so forecast data can be filtered to exclude them
-      // from metrics. Still include the actual production value so daily chart
-      // totals match "Rezulate CEF" (which includes all production).
       limitedTimestamps.add(tsKey);
     }
 
     let total = 0;
     for (let k = 0; k < nvpgCols.length; k++) {
-      const v = parseNumber(row[nvpgCols[k]]);
+      const v = parseFloat(row[nvpgCols[k]]);
       if (isNaN(v)) continue;
       total += v;
       const slug = colSlugs[k];
@@ -576,9 +530,6 @@ function parseBenchmarkCEF(wb) {
     points.push({ timestamp: ts, value: total });
   }
 
-  // Derive MWp per plant from peak observed production:
-  //   peak_MWh_per_15min × 4 = MWp.  Excludes limited intervals so curtailed
-  //   peaks don't deflate the capacity estimate.
   const capacityBySlug = {};
   let totalCapacityMWp = 0;
   for (const slug of CEF_SLUGS) {
@@ -594,15 +545,11 @@ function parseBenchmarkCEF(wb) {
   return { points, limitedTimestamps, perPlant, capacityBySlug, capacityMWhPerInterval };
 }
 
-// Parse a simple benchmark category sheet (Mic Prod or Prosumatori).
-// Structure: row 0 = aggregate totals, row 1 = group headers, row 2 = col names,
-// row 3+ = data. Actual NOVA POWER values are at cols 6-10.
 function parseBenchmarkCategorySheet(wb, sheetName) {
   const ws = wb.Sheets[sheetName];
   if (!ws) return [];
   const fullRange = XLSX.utils.decode_range(ws['!ref'] || 'A1');
 
-  // Data rows start at row 3 (0-indexed); date at col 1, time at col 2, values at 6-10
   const dataRows = XLSX.utils.sheet_to_json(ws, {
     header: 1, defval: null,
     range: { s: { r: 3, c: 0 }, e: { r: fullRange.e.r, c: 10 } },
@@ -631,7 +578,7 @@ function parseBenchmarkCategorySheet(wb, sheetName) {
 
     let value = 0;
     for (let c = 6; c <= 10; c++) {
-      const v = parseNumber(row[c]);
+      const v = parseFloat(row[c]);
       if (!isNaN(v)) value += v;
     }
     pts.push({ timestamp: ts, value });
@@ -641,17 +588,6 @@ function parseBenchmarkCategorySheet(wb, sheetName) {
 
 // ─── Real-data file parser ────────────────────────────────────────────────────
 
-/**
- * Parse the real-data benchmark file.
- * Returns {
- *   cef: {
- *     points, limitedTimestamps,
- *     perPlant, capacityBySlug, capacityMWhPerInterval
- *   },
- *   smallprod: { points },
- *   prosumer:  { points },
- * }
- */
 export async function parseRealDataFile(buffer, filename) {
   const emptyResult = {
     cef: {
@@ -666,7 +602,6 @@ export async function parseRealDataFile(buffer, filename) {
   try {
     const isCsv = filename.toLowerCase().endsWith('.csv');
     if (isCsv) {
-      // Generic CSV: only CEF aggregate
       const text = new TextDecoder().decode(buffer);
       const lines = text.trim().split('\n').filter(l => l.trim());
       const sep = lines[0].includes(';') ? ';' : ',';
@@ -679,7 +614,7 @@ export async function parseRealDataFile(buffer, filename) {
         if (!ts) continue;
         let total = 0;
         for (let c = dataStart; c < cols.length; c++) {
-          const v = parseNumber(cols[c]);
+          const v = parseFloat(cols[c]);
           if (!isNaN(v)) total += v;
         }
         pts.push({ timestamp: ts, value: total });
