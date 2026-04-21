@@ -46,7 +46,17 @@ export function normalizePlantName(rawName) {
 
   return null;
 }
+export function isSmallProdColumn(rawName) {
+  if (rawName == null) return false;
+  const s = String(rawName).toLowerCase().replace(/\s+/g, ' ').trim();
+  return /irum|campo verde|heckler|francomi/.test(s);
+}
 
+export function isProsumerColumn(rawName) {
+  if (rawName == null) return false;
+  const s = String(rawName).toLowerCase().replace(/\s+/g, ' ').trim();
+  return /^(deer|delgaz|deo|rel)\b/.test(s) || /^dso\d|^ds0?4/.test(s);
+}
 // ─── Forecast-type detection ──────────────────────────────────────────────────
 
 export function detectForecastType(filename) {
