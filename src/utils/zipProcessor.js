@@ -58,20 +58,24 @@ function addPerPlantToMaps(perPlantMaps, perPlant) {
  * multi-column CSV per day).
  */
 async function processEnercastGroup(files) {
-  const cefMap = new Map();
-  const perPlant = makePerPlantMaps();
+  const cefMap       = new Map();
+  const perPlant     = makePerPlantMaps();
+  const smallprodMap = new Map();
+  const prosumerMap  = new Map();
 
   for (const { buffer, filename } of files) {
     const cats = await parseFile('ENERCAST', buffer, filename);
     addPointsToMap(cefMap, cats.cef.points);
     addPerPlantToMaps(perPlant, cats.cef.perPlant);
+    addPointsToMap(smallprodMap, cats.smallprod.points);
+    addPointsToMap(prosumerMap,  cats.prosumer.points);
   }
 
   return {
-    cef: cefMap,
+    cef:         cefMap,
     cefPerPlant: perPlant,
-    smallprod: new Map(),
-    prosumer: new Map(),
+    smallprod:   smallprodMap,
+    prosumer:    prosumerMap,
   };
 }
 

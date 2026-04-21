@@ -46,7 +46,17 @@ export function normalizePlantName(rawName) {
 
   return null;
 }
+export function isSmallProdColumn(rawName) {
+  if (rawName == null) return false;
+  const s = String(rawName).toLowerCase().replace(/\s+/g, ' ').trim();
+  return /irum|campo verde|heckler|francomi/.test(s);
+}
 
+export function isProsumerColumn(rawName) {
+  if (rawName == null) return false;
+  const s = String(rawName).toLowerCase().replace(/\s+/g, ' ').trim();
+  return /^(deer|delgaz|deo|rel)\b/.test(s) || /^dso\d|^ds0?4/.test(s);
+}
 // ─── Forecast-type detection ──────────────────────────────────────────────────
 
 export function detectForecastType(filename) {
@@ -224,13 +234,31 @@ function parseTimestampSheet(wb, sheetName) {
 function parseADEX(wb) {
   const ws = getSheet(wb, 'Worksheet');
   const rows = sheetToRows(ws);
-  if (rows.length < 4) return { points: [], perPlant: emptyPerPlant() };
+  if (rows.length < 4) return { cef: { points: [], perPlant: emptyPerPlant() }, smallprod: [], prosumer: [] };
 
   const header = rows[0];
-  const colToSlug = header.map((v, c) => c === 0 ? null : normalizePlantName(v));
+  const colToCef = header.map((v, c) => c === 0 ? null : normalizePlantName(v));
+  const colToSp  = header.map(v => isSmallProdColumn(v));
+  const colToPr  = header.map(v => isProsumerColumn(v));
 
   const dataRows = rows.slice(3).filter(r => r[0] != null);
-  return buildFromRows(dataRows, colToSlug, row => parseTimestamp(row[0]));
+  const cef = buildFromRows(dataRows, colToCef, row => parseTimestamp(row[0]));
+
+  const spPts = [], prPts = [];
+  for (const row of dataRows) {
+    const ts = parseTimestamp(row[0]);
+    if (!ts) continue;
+    let spTotal = 0, prTotal = 0;
+    for (let c = 0; c < header.length; c++) {
+      const v = parseFloat(row[c]);
+      if (isNaN(v)) continue;
+      if (colToSp[c]) spTotal += v;
+      if (colToPr[c]) prTotal += v;
+    }
+    spPts.push({ timestamp: ts, value: spTotal });
+    prPts.push({ timestamp: ts, value: prTotal });
+  }
+  return { cef, smallprod: spPts, prosumer: prPts };
 }
 
 // ENERCAST CSV: semicolon-delimited. Header has many columns mixing CEF,
@@ -238,44 +266,43 @@ function parseADEX(wb) {
 // plant columns by name and recompute the CEF total from those.
 export function parseENERCAST_CSV(text) {
   const lines = text.trim().split('\n').filter(l => l.trim());
-  if (lines.length < 2) return { points: [], perPlant: emptyPerPlant() };
+  if (lines.length < 2) return { points: [], perPlant: emptyPerPlant(), smallprod: [], prosumer: [] };
 
   const headers = lines[0].split(';').map(h => h.trim());
   const isPerPlant = headers[0].toLowerCase().startsWith('timestamp') && headers.length <= 4;
 
-  // Build col→slug map. For per-plant single-series files the plant name is
-  // usually in col 1 or encoded in the filename — fall back to null and rely on
-  // the single-value column 2.
   const colToSlug = headers.map(h => normalizePlantName(h));
+  const colToSp   = headers.map(h => isSmallProdColumn(h));
+  const colToPr   = headers.map(h => isProsumerColumn(h));
 
-  const points = [];
+  const points = [], spPoints = [], prPoints = [];
   const perPlant = emptyPerPlant();
 
   for (let i = 1; i < lines.length; i++) {
     const cols = lines[i].split(';');
-    let ts;
     if (isPerPlant) {
-      ts = parseTimestamp(cols[0]);
+      const ts = parseTimestamp(cols[0]);
       if (!ts) continue;
       const v = parseFloat(cols[2]) || 0;
       points.push({ timestamp: ts, value: v });
-      // single-plant file — no slug mapping available
     } else {
-      ts = parseDdMmYyyy(cols[0], cols[1]);
+      const ts = parseDdMmYyyy(cols[0], cols[1]);
       if (!ts) continue;
-      let total = 0;
-      for (let c = 0; c < colToSlug.length; c++) {
-        const slug = colToSlug[c];
-        if (!slug) continue;
+      let cefTotal = 0, spTotal = 0, prTotal = 0;
+      for (let c = 0; c < headers.length; c++) {
         const v = parseFloat(cols[c]);
         if (isNaN(v)) continue;
-        total += v;
-        perPlant[slug].push({ timestamp: ts, value: v });
+        const slug = colToSlug[c];
+        if (slug) { cefTotal += v; perPlant[slug].push({ timestamp: ts, value: v }); }
+        if (colToSp[c]) spTotal += v;
+        if (colToPr[c]) prTotal += v;
       }
-      points.push({ timestamp: ts, value: total });
+      points.push({ timestamp: ts, value: cefTotal });
+      spPoints.push({ timestamp: ts, value: spTotal });
+      prPoints.push({ timestamp: ts, value: prTotal });
     }
   }
-  return { points, perPlant };
+  return { points, perPlant, smallprod: spPoints, prosumer: prPoints };
 }
 
 // METEOLOGICA PV files: sheet 'Forecast', 2 header rows, timestamp col 0,
@@ -346,7 +373,7 @@ export async function parseFile(company, buffer, filename) {
     if (isCsv) {
       if (company === 'ENERCAST') {
         const result = parseENERCAST_CSV(new TextDecoder().decode(buffer));
-        return { cef: result, smallprod: emptyCat(), prosumer: emptyCat() };
+        return { cef:       { points: result.points, perPlant: result.perPlant }, smallprod: { points: result.smallprod }, prosumer:  { points: result.prosumer }, };
       }
       // Generic CSV — unknown layout; aggregate only, no per-plant.
       const text = new TextDecoder().decode(buffer);
@@ -375,7 +402,10 @@ export async function parseFile(company, buffer, filename) {
 
     switch (company) {
       case 'ADEX':
-        cef = parseADEX(wb);
+        const r = parseADEX(wb);
+        cef = r.cef;
+        smallprodPts = r.smallprod;
+        prosumerPts  = r.prosumer;
         break;
 
       case 'AMPERMETEO':
