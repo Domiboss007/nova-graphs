@@ -430,13 +430,29 @@ export function parseENERCAST_CSV(text) {
 function parseMETEOLOGICA(wb) {
   const ws = getSheet(wb, 'Forecast');
   const rows = sheetToRows(ws);
-  if (rows.length < 3) return { points: [], perPlant: emptyPerPlant() };
+  if (rows.length < 3) return { points: [], perPlant: emptyPerPlant(), smallprod: [], prosumer: [] };
 
   const header = rows[1] ?? rows[0];
   const colToSlug = header.map((v, c) => c < 4 ? null : normalizePlantName(v));
+  const colToSp   = header.map((v, c) => c < 4 ? false : isSmallProdColumn(v));
 
   const dataRows = rows.slice(2).filter(r => r[0] != null);
-  return buildFromRows(dataRows, colToSlug, row => parseTimestamp(row[0]));
+  const cef = buildFromRows(dataRows, colToSlug, row => parseTimestamp(row[0]));
+
+  const spPts = [];
+  for (const row of dataRows) {
+    const ts = parseTimestamp(row[0]);
+    if (!ts) continue;
+    let total = 0;
+    for (let c = 4; c < header.length; c++) {
+      if (!colToSp[c]) continue;
+      const v = parseFloat(row[c]);
+      if (!isNaN(v)) total += v;
+    }
+    spPts.push({ timestamp: ts, value: total });
+  }
+
+  return { ...cef, smallprod: spPts };
 }
 
 function parseMETEOLOGICA_PROSUMERS(wb) {
@@ -544,7 +560,9 @@ export async function parseFile(company, buffer, filename) {
         if (isProsumerFile) {
           prosumerPts = parseMETEOLOGICA_PROSUMERS(wb);
         } else {
-          cef = parseMETEOLOGICA(wb);
+          const r = parseMETEOLOGICA(wb);
+          cef = { points: r.points, perPlant: r.perPlant };
+          smallprodPts = r.smallprod;
         }
         break;
 
