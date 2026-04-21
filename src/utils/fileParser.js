@@ -1,5 +1,11 @@
 import * as XLSX from 'xlsx';
 
+function parseNumber(v) {
+  if (v == null) return NaN;
+  if (typeof v === 'number') return v;
+  return parseNumber(String(v).replace(',', '.'));
+}
+
 // ─── Canonical CEF plants ─────────────────────────────────────────────────────
 // Order matches the benchmark CEF sheet's NVPG columns.
 export const CANONICAL_CEF_PLANTS = [
@@ -12,6 +18,7 @@ export const CANONICAL_CEF_PLANTS = [
 ];
 export const CEF_SLUGS = CANONICAL_CEF_PLANTS.map(p => p.slug);
 const CEF_SLUG_SET = new Set(CEF_SLUGS);
+
 
 /**
  * Normalises a raw plant/column name to a canonical CEF slug, or null if it's
@@ -169,7 +176,7 @@ function buildFromRows(dataRows, colToSlug, getTimestamp) {
     for (let c = 0; c < colToSlug.length; c++) {
       const slug = colToSlug[c];
       if (!slug) continue;
-      const v = parseFloat(row[c]);
+      const v = parseNumber(row[c]);
       if (isNaN(v)) continue;
       total += v;
       perPlant[slug].push({ timestamp: ts, value: v });
@@ -250,7 +257,7 @@ function parseADEX(wb) {
     if (!ts) continue;
     let spTotal = 0, prTotal = 0;
     for (let c = 0; c < header.length; c++) {
-      const v = parseFloat(row[c]);
+      const v = parseNumber(row[c]);
       if (isNaN(v)) continue;
       if (colToSp[c]) spTotal += v;
       if (colToPr[c]) prTotal += v;
@@ -283,14 +290,14 @@ export function parseENERCAST_CSV(text) {
     if (isPerPlant) {
       const ts = parseTimestamp(cols[0]);
       if (!ts) continue;
-      const v = parseFloat(cols[2]) || 0;
+      const v = parseNumber(cols[2]) || 0;
       points.push({ timestamp: ts, value: v });
     } else {
       const ts = parseDdMmYyyy(cols[0], cols[1]);
       if (!ts) continue;
       let cefTotal = 0, spTotal = 0, prTotal = 0;
       for (let c = 0; c < headers.length; c++) {
-        const v = parseFloat(cols[c]);
+        const v = parseNumber(cols[c]);
         if (isNaN(v)) continue;
         const slug = colToSlug[c];
         if (slug) { cefTotal += v; perPlant[slug].push({ timestamp: ts, value: v }); }
@@ -332,7 +339,7 @@ function parseMETEOLOGICA_PROSUMERS(wb) {
     if (!row[2]) continue;
     const ts = parseTimestamp(row[2]);
     if (!ts) continue;
-    const v = parseFloat(row[6]);
+    const v = parseNumber(row[6]);
     if (isNaN(v)) continue;
     pts.push({ timestamp: ts, value: v });
   }
@@ -387,7 +394,7 @@ export async function parseFile(company, buffer, filename) {
         if (!ts) continue;
         let total = 0;
         for (let c = 1; c < cols.length; c++) {
-          const v = parseFloat(cols[c]);
+          const v = parseNumber(cols[c]);
           if (!isNaN(v)) total += v;
         }
         pts.push({ timestamp: ts, value: total });
@@ -557,7 +564,7 @@ function parseBenchmarkCEF(wb) {
 
     let total = 0;
     for (let k = 0; k < nvpgCols.length; k++) {
-      const v = parseFloat(row[nvpgCols[k]]);
+      const v = parseNumber(row[nvpgCols[k]]);
       if (isNaN(v)) continue;
       total += v;
       const slug = colSlugs[k];
@@ -624,7 +631,7 @@ function parseBenchmarkCategorySheet(wb, sheetName) {
 
     let value = 0;
     for (let c = 6; c <= 10; c++) {
-      const v = parseFloat(row[c]);
+      const v = parseNumber(row[c]);
       if (!isNaN(v)) value += v;
     }
     pts.push({ timestamp: ts, value });
@@ -672,7 +679,7 @@ export async function parseRealDataFile(buffer, filename) {
         if (!ts) continue;
         let total = 0;
         for (let c = dataStart; c < cols.length; c++) {
-          const v = parseFloat(cols[c]);
+          const v = parseNumber(cols[c]);
           if (!isNaN(v)) total += v;
         }
         pts.push({ timestamp: ts, value: total });
