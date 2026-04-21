@@ -162,7 +162,7 @@ function buildFromRows(dataRows, colToSlug, getTimestamp) {
     for (let c = 0; c < colToSlug.length; c++) {
       const slug = colToSlug[c];
       if (!slug) continue;
-      const v = parseFloat(row[c]);
+      const v = parseNumber(row[c]);
       if (isNaN(v)) continue;
       total += v;
       perPlant[slug].push({ timestamp: ts, value: v });
