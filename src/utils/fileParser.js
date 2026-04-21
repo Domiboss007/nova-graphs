@@ -33,7 +33,7 @@ export function normalizePlantName(rawName) {
 
   const hasCampia  = s.includes('campia');
   const hasSotanga = s.includes('sotanga');
-  const m = s.match(/cef\s*(\d)/);
+  const m = s.match(/cef[_\s]*(\d)/);
   const n = m ? m[1] : null;
 
   if (hasSotanga) return n === '2' ? 'sotanga2' : 'sotanga1';
