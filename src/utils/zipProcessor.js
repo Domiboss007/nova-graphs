@@ -24,15 +24,15 @@ function makeTypeMaps() {
     intraday: {
       cef: new Map(),
       cefPerPlant: makePerPlantMaps(),
-      smallprod: new Map(),
-      prosumer: new Map(),
     },
     dayahead: {
       cef: new Map(),
       cefPerPlant: makePerPlantMaps(),
-      smallprod: new Map(),
-      prosumer: new Map(),
     },
+    // smallprod and prosumer are shared across forecast types
+    // because companies submit the same data in both intraday and day-ahead
+    smallprod: new Map(),
+    prosumer: new Map(),
   };
 }
 
@@ -52,11 +52,6 @@ function addPerPlantToMaps(perPlantMaps, perPlant) {
   }
 }
 
-/**
- * Process all ENERCAST files of a single forecast type.
- * ENERCAST only provides CEF data (aggregate + per-plant parsed from a single
- * multi-column CSV per day).
- */
 async function processEnercastGroup(files) {
   const cefMap       = new Map();
   const perPlant     = makePerPlantMaps();
@@ -79,15 +74,6 @@ async function processEnercastGroup(files) {
   };
 }
 
-/**
- * Processes a ZIP file and returns:
- *   { [company]: {
- *       intraday?: { cef, cefPerPlant, smallprod, prosumer },
- *       dayahead?: { ... }
- *   } }
- * where `cef`, `smallprod`, `prosumer` are TimeSeriesPoint[] and
- * `cefPerPlant` is { [slug]: TimeSeriesPoint[] }.
- */
 export async function processZip(zipFile, onProgress) {
   const zip = await JSZip.loadAsync(zipFile);
 
@@ -136,10 +122,14 @@ export async function processZip(zipFile, onProgress) {
       companyMaps[company] = makeTypeMaps();
     }
 
-    addPointsToMap(companyMaps[company][fType].cef,       cats.cef.points);
+    // CEF goes into per-type maps
+    addPointsToMap(companyMaps[company][fType].cef, cats.cef.points);
     addPerPlantToMaps(companyMaps[company][fType].cefPerPlant, cats.cef.perPlant);
-    addPointsToMap(companyMaps[company][fType].smallprod, cats.smallprod.points);
-    addPointsToMap(companyMaps[company][fType].prosumer,  cats.prosumer.points);
+
+    // smallprod and prosumer go into shared company-level maps
+    // Map keyed by timestamp so duplicates from intraday+dayahead are ignored
+    addPointsToMap(companyMaps[company].smallprod, cats.smallprod.points);
+    addPointsToMap(companyMaps[company].prosumer,  cats.prosumer.points);
   }
 
   // Process ENERCAST per type
@@ -148,19 +138,34 @@ export async function processZip(zipFile, onProgress) {
     const cats = await processEnercastGroup(enercastByType[type]);
     if (cats.cef.size > 0) {
       if (!companyMaps['ENERCAST']) companyMaps['ENERCAST'] = makeTypeMaps();
-      companyMaps['ENERCAST'][type] = cats;
+      companyMaps['ENERCAST'][type].cef         = cats.cef;
+      companyMaps['ENERCAST'][type].cefPerPlant = cats.cefPerPlant;
+      addPointsToMap(companyMaps['ENERCAST'].smallprod, Array.from(cats.smallprod.values()));
+      addPointsToMap(companyMaps['ENERCAST'].prosumer,  Array.from(cats.prosumer.values()));
     }
   }
 
   // Convert Maps → sorted arrays; only keep types with any data.
   const result = {};
-  for (const [company, types] of Object.entries(companyMaps)) {
+  for (const [company, data] of Object.entries(companyMaps)) {
     const companyResult = {};
     let hasAny = false;
-    for (const [type, cats] of Object.entries(types)) {
-      const cefArr       = Array.from(cats.cef.values()).filter(pt => pt.timestamp).sort((a, b) => a.timestamp - b.timestamp);
-      const smallprodArr = Array.from(cats.smallprod.values()).filter(pt => pt.timestamp).sort((a, b) => a.timestamp - b.timestamp);
-      const prosumerArr  = Array.from(cats.prosumer.values()).filter(pt => pt.timestamp).sort((a, b) => a.timestamp - b.timestamp);
+
+    // Convert shared smallprod and prosumer
+    const smallprodArr = Array.from(data.smallprod.values())
+      .filter(pt => pt.timestamp)
+      .sort((a, b) => a.timestamp - b.timestamp);
+    const prosumerArr = Array.from(data.prosumer.values())
+      .filter(pt => pt.timestamp)
+      .sort((a, b) => a.timestamp - b.timestamp);
+
+    for (const type of ['intraday', 'dayahead']) {
+      const cats = data[type];
+      if (!cats) continue;
+
+      const cefArr = Array.from(cats.cef.values())
+        .filter(pt => pt.timestamp)
+        .sort((a, b) => a.timestamp - b.timestamp);
 
       const perPlant = {};
       for (const slug of CEF_SLUGS) {
@@ -181,6 +186,7 @@ export async function processZip(zipFile, onProgress) {
       };
       hasAny = true;
     }
+
     if (hasAny) result[company] = companyResult;
   }
 
