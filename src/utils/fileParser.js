@@ -228,7 +228,6 @@ function parseTimestampSheet(wb, sheetName) {
 
 // ─── SmallProd sheet parsers ──────────────────────────────────────────────────
 
-// For ENLITIA, EUROWIND, FORESIA, METEOMATICS: timestamp in col 0
 function parseSmallProdTimestampSheet(wb, sheetName) {
   if (!wb.SheetNames.includes(sheetName)) return [];
   const ws = wb.Sheets[sheetName];
@@ -252,7 +251,6 @@ function parseSmallProdTimestampSheet(wb, sheetName) {
   return pts;
 }
 
-// For AMPERMETEO, SOLCAST: Data/Ora format
 function parseDataOraSmallProdSheet(wb, sheetName) {
   if (!wb.SheetNames.includes(sheetName)) return [];
   const ws = wb.Sheets[sheetName];
@@ -291,14 +289,12 @@ function parseDataOraSmallProdSheet(wb, sheetName) {
 
 // ─── Prosumer sheet parsers ───────────────────────────────────────────────────
 
-// For ENLITIA, EUROWIND, FORESIA, METEOMATICS: timestamp in col 0
 function parseProsumerTimestampSheet(wb, sheetName) {
   if (!wb.SheetNames.includes(sheetName)) return [];
   const ws = wb.Sheets[sheetName];
   const rows = sheetToRows(ws);
   if (rows.length === 0) return [];
   const header = rows[0];
-  const aggIdx = header.findIndex(v => v != null && /^aggregat/i.test(String(v)));
   const colToPr = header.map(v => isProsumerColumn(v));
   const dataRows = rows.slice(1).filter(r => r[0] != null);
   const pts = [];
@@ -306,22 +302,16 @@ function parseProsumerTimestampSheet(wb, sheetName) {
     const ts = parseTimestamp(row[0]);
     if (!ts) continue;
     let total = 0;
-    if (aggIdx !== -1 && row[aggIdx] != null) {
-      const v = parseFloat(row[aggIdx]);
-      if (!isNaN(v)) total = v;
-    } else {
-      for (let c = 0; c < header.length; c++) {
-        if (!colToPr[c]) continue;
-        const v = parseFloat(row[c]);
-        if (!isNaN(v)) total += v;
-      }
+    for (let c = 0; c < header.length; c++) {
+      if (!colToPr[c]) continue;
+      const v = parseFloat(row[c]);
+      if (!isNaN(v)) total += v;
     }
     pts.push({ timestamp: ts, value: total });
   }
   return pts;
 }
 
-// For AMPERMETEO: Data/Ora format
 function parseDataOraProsumerSheet(wb, sheetName) {
   if (!wb.SheetNames.includes(sheetName)) return [];
   const ws = wb.Sheets[sheetName];
@@ -341,7 +331,6 @@ function parseDataOraProsumerSheet(wb, sheetName) {
   if (dateCol === -1) return [];
 
   const header = rows[headerIdx];
-  const aggIdx = header.findIndex((v, c) => c >= plantStartCol && v != null && /^aggregat/i.test(String(v)));
   const colToPr = header.map((v, c) => c >= plantStartCol ? isProsumerColumn(v) : false);
   const dataRows = rows.slice(headerIdx + 1).filter(r => r[dateCol] != null);
   const pts = [];
@@ -349,15 +338,10 @@ function parseDataOraProsumerSheet(wb, sheetName) {
     const ts = parseDdMmYyyy(row[dateCol], row[timeCol]);
     if (!ts) continue;
     let total = 0;
-    if (aggIdx !== -1 && row[aggIdx] != null) {
-      const v = parseFloat(row[aggIdx]);
-      if (!isNaN(v)) total = v;
-    } else {
-      for (let c = 0; c < header.length; c++) {
-        if (!colToPr[c]) continue;
-        const v = parseFloat(row[c]);
-        if (!isNaN(v)) total += v;
-      }
+    for (let c = 0; c < header.length; c++) {
+      if (!colToPr[c]) continue;
+      const v = parseFloat(row[c]);
+      if (!isNaN(v)) total += v;
     }
     pts.push({ timestamp: ts, value: total });
   }
@@ -440,7 +424,7 @@ export function parseENERCAST_CSV(text) {
 function parseMETEOLOGICA(wb) {
   const ws = getSheet(wb, 'Forecast');
   const rows = sheetToRows(ws);
-  if (rows.length < 3) return { points: [], perPlant: emptyPerPlant(), smallprod: [], prosumer: [] };
+  if (rows.length < 3) return { points: [], perPlant: emptyPerPlant(), smallprod: [] };
 
   const header = rows[1] ?? rows[0];
   const colToSlug = header.map((v, c) => c < 4 ? null : normalizePlantName(v));
@@ -716,9 +700,23 @@ function parseBenchmarkCategorySheet(wb, sheetName) {
   if (!ws) return [];
   const fullRange = XLSX.utils.decode_range(ws['!ref'] || 'A1');
 
+  // Read header row (row index 2, 0-based) to identify columns by name
+  const headerRows = XLSX.utils.sheet_to_json(ws, {
+    header: 1, defval: null,
+    range: { s: { r: 2, c: 0 }, e: { r: 2, c: 15 } },
+  });
+  const header = headerRows[0] ?? [];
+
+  // For each column, determine if it should be included:
+  // Mic Prod: individual plant columns (isSmallProdColumn)
+  // Prosumatori: individual DSO columns (isProsumerColumn) — excludes AGREGATED
+  const colFilter = header.map(v =>
+    sheetName === 'Mic Prod' ? isSmallProdColumn(v) : isProsumerColumn(v)
+  );
+
   const dataRows = XLSX.utils.sheet_to_json(ws, {
     header: 1, defval: null,
-    range: { s: { r: 3, c: 0 }, e: { r: fullRange.e.r, c: 10 } },
+    range: { s: { r: 3, c: 0 }, e: { r: fullRange.e.r, c: 15 } },
   });
 
   const pts = [];
@@ -743,7 +741,8 @@ function parseBenchmarkCategorySheet(wb, sheetName) {
     if (!ts || isNaN(ts.getTime())) continue;
 
     let value = 0;
-    for (let c = 6; c <= 10; c++) {
+    for (let c = 0; c < colFilter.length; c++) {
+      if (!colFilter[c]) continue;
       const v = parseFloat(row[c]);
       if (!isNaN(v)) value += v;
     }
