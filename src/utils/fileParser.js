@@ -48,13 +48,23 @@ export function normalizePlantName(rawName) {
 export function isSmallProdColumn(rawName) {
   if (rawName == null) return false;
   const s = String(rawName).toLowerCase().replace(/\s+/g, ' ').trim();
-  return /irum|campo verde|heckler|francomi/.test(s);
+  return [
+    'cef irum reghin',
+    'cef campo verde energy',
+    'cef campo verde solaris',
+    'cef heckler',
+    'cef francomi',
+    'campo verde energy',
+    'campo verde solaris',
+    'heckler romania',
+    'irum reghin',
+  ].some(name => s.includes(name));
 }
 
 export function isProsumerColumn(rawName) {
   if (rawName == null) return false;
   const s = String(rawName).toLowerCase().replace(/\s+/g, ' ').trim();
-  return /^(deer|delgaz|deo|rel)\b/.test(s) || /^dso\d|^ds0?4/.test(s);
+  return ['dso1_rel', 'dso2_deo', 'dso3_deer', 'ds04_delgaz'].includes(s);
 }
 
 // ─── Forecast-type detection ──────────────────────────────────────────────────
