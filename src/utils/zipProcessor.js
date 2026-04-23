@@ -122,12 +122,12 @@ export async function processZip(zipFile, onProgress) {
       companyMaps[company] = makeTypeMaps();
     }
 
-    // CEF goes into per-type maps
+    // CEF goes into per-type maps (intraday and dayahead tracked separately)
     addPointsToMap(companyMaps[company][fType].cef, cats.cef.points);
     addPerPlantToMaps(companyMaps[company][fType].cefPerPlant, cats.cef.perPlant);
 
     // smallprod and prosumer go into shared company-level maps
-    // Map keyed by timestamp so duplicates from intraday+dayahead are ignored
+    // Map keyed by timestamp so duplicates from intraday+dayahead are deduplicated
     addPointsToMap(companyMaps[company].smallprod, cats.smallprod.points);
     addPointsToMap(companyMaps[company].prosumer,  cats.prosumer.points);
   }
@@ -151,7 +151,7 @@ export async function processZip(zipFile, onProgress) {
     const companyResult = {};
     let hasAny = false;
 
-    // Convert shared smallprod and prosumer
+    // Convert shared smallprod and prosumer once
     const smallprodArr = Array.from(data.smallprod.values())
       .filter(pt => pt.timestamp)
       .sort((a, b) => a.timestamp - b.timestamp);
@@ -181,10 +181,18 @@ export async function processZip(zipFile, onProgress) {
       companyResult[type] = {
         cef:         cefArr,
         cefPerPlant: perPlant,
-        smallprod:   smallprodArr,
-        prosumer:    prosumerArr,
+        // Only attach smallprod/prosumer to intraday to avoid double-counting
+        // in dataProcessor which processes both forecast types
+        smallprod:   type === 'intraday' ? smallprodArr : [],
+        prosumer:    type === 'intraday' ? prosumerArr  : [],
       };
       hasAny = true;
+    }
+
+    // If company only has dayahead (no intraday), attach smallprod/prosumer there
+    if (hasAny && !companyResult['intraday'] && companyResult['dayahead']) {
+      companyResult['dayahead'].smallprod = smallprodArr;
+      companyResult['dayahead'].prosumer  = prosumerArr;
     }
 
     if (hasAny) result[company] = companyResult;
