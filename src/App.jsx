@@ -43,6 +43,15 @@ const CEF_LABEL = { intraday: 'Intraday', dayahead: 'Day-Ahead' };
 const CEF_TYPES = ['intraday', 'dayahead'];
 const BUCKET = 15 * 60 * 1000;
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function dateKey(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
 function filterLimited(pts, limitedTimestamps) {
   if (!limitedTimestamps || limitedTimestamps.size === 0) return pts;
   return pts.filter(pt => {
@@ -59,6 +68,13 @@ function filterPerPlantLimited(perPlant, limitedTimestamps) {
     out[slug] = filterLimited(perPlant[slug] ?? [], limitedTimestamps);
   }
   return out;
+}
+
+// Only keep forecast points whose date exists in the actual data
+function filterToActualDates(forecastPts, actualPts) {
+  if (!actualPts || actualPts.length === 0) return forecastPts;
+  const actualDates = new Set(actualPts.map(pt => dateKey(pt.timestamp)));
+  return forecastPts.filter(pt => actualDates.has(dateKey(pt.timestamp)));
 }
 
 // smallprod and prosumer are identical in both intraday and dayahead files
@@ -82,6 +98,8 @@ function combinePerPlant(typeMap) {
   }
   return out;
 }
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [zipFile,         setZipFile]         = useState(null);
@@ -142,12 +160,12 @@ export default function App() {
       for (const [company, types] of Object.entries(forecastData)) {
         const compOut = {};
 
-        // CEF: one block per forecast type
+        // CEF: one block per forecast type, filtered to benchmark date range
         for (const fType of CEF_TYPES) {
           const typeData = types[fType];
           if (!typeData) continue;
           const raw = typeData.cef || [];
-          const pts = filterLimited(raw, limitedTs);
+          const pts = filterToActualDates(filterLimited(raw, limitedTs), cefActual);
           if (pts.length === 0) continue;
           const dailyMets   = computeDailyMetrics(pts, cefActual, cefCapacity);
           const dailyNmaes  = Object.values(dailyMets).map(v => v.nmae).filter(v => v != null);
@@ -164,26 +182,32 @@ export default function App() {
           };
         }
 
-        // Small producers: take from intraday only (same data in both types)
+        // Small producers: filtered to benchmark date range
         const spRaw = filterLimited(combinePoints(types, 'smallprod'), limitedTs);
         if (spRaw.length > 0) {
-          compOut.smallprod = {
-            daily:      mergeDailyData(spActualDaily, computeDailyTotals(spRaw)),
-            hourly:     mergeHourlyData(spActualHourly, computeHourlyProfile(spRaw)),
-            metrics:    computeMetrics(spRaw, spActual),
-            pointCount: spRaw.length,
-          };
+          const spFiltered = filterToActualDates(spRaw, spActual);
+          if (spFiltered.length > 0) {
+            compOut.smallprod = {
+              daily:      mergeDailyData(spActualDaily, computeDailyTotals(spFiltered)),
+              hourly:     mergeHourlyData(spActualHourly, computeHourlyProfile(spFiltered)),
+              metrics:    computeMetrics(spFiltered, spActual),
+              pointCount: spFiltered.length,
+            };
+          }
         }
 
-        // Prosumers: take from intraday only (same data in both types)
+        // Prosumers: filtered to benchmark date range
         const prRaw = combinePoints(types, 'prosumer');
         if (prRaw.length > 0) {
-          compOut.prosumer = {
-            daily:      mergeDailyData(prActualDaily, computeDailyTotals(prRaw)),
-            hourly:     mergeHourlyData(prActualHourly, computeHourlyProfile(prRaw)),
-            metrics:    computeMetrics(prRaw, prActual),
-            pointCount: prRaw.length,
-          };
+          const prFiltered = filterToActualDates(prRaw, prActual);
+          if (prFiltered.length > 0) {
+            compOut.prosumer = {
+              daily:      mergeDailyData(prActualDaily, computeDailyTotals(prFiltered)),
+              hourly:     mergeHourlyData(prActualHourly, computeHourlyProfile(prFiltered)),
+              metrics:    computeMetrics(prFiltered, prActual),
+              pointCount: prFiltered.length,
+            };
+          }
         }
 
         if (Object.keys(compOut).length > 0) out[company] = compOut;
@@ -246,7 +270,7 @@ export default function App() {
           const combined = combinePerPlant(types);
           const filtered = filterPerPlantLimited(combined, limitedTs);
           const plantRow = CANONICAL_CEF_PLANTS.map(({ slug }) => {
-            const fc = filtered[slug] ?? [];
+            const fc = filterToActualDates(filtered[slug] ?? [], cefActualPerPlant[slug] ?? []);
             const ac = cefActualPerPlant[slug] ?? [];
             if (fc.length === 0 || ac.length === 0) return { nmae: null, n: 0 };
             const capPerInterval = capacityBySlug[slug] != null
@@ -272,7 +296,7 @@ export default function App() {
         const allPts = [];
         for (const fType of CEF_TYPES) {
           const raw = compTypes[fType]?.cef ?? [];
-          allPts.push(...filterLimited(raw, limitedTs));
+          allPts.push(...filterToActualDates(filterLimited(raw, limitedTs), cefActual));
         }
         if (allPts.length === 0) continue;
         dailyRankingRaw[company] = computeDailyMetrics(allPts, cefActual, cefCapacity);
