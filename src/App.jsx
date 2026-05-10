@@ -18,10 +18,8 @@ import { DailyRankingTable } from './components/DailyRankingTable.jsx';
 import './App.css';
 import { COMPANY_ORDER, COMPANY_CODES, ANON_EXCLUDE } from './utils/constants.js';
 
-// Re-export so any code that already imports these from App.jsx keeps working
 export { COMPANY_ORDER, COMPANY_CODES, ANON_EXCLUDE };
 
-// Shown once in the anonymised section so readers can decode the codes
 function CompanyCodeKey() {
   const entries = COMPANY_ORDER.filter(c => !ANON_EXCLUDE.has(c));
   return (
@@ -41,8 +39,8 @@ function CompanyCodeKey() {
   );
 }
 
-const CEF_LABEL     = { intraday: 'Intraday', dayahead: 'Day-Ahead' };
-const CEF_TYPES     = ['intraday', 'dayahead'];
+const CEF_LABEL = { intraday: 'Intraday', dayahead: 'Day-Ahead' };
+const CEF_TYPES = ['intraday', 'dayahead'];
 const BUCKET = 15 * 60 * 1000;
 
 function filterLimited(pts, limitedTimestamps) {
@@ -63,12 +61,12 @@ function filterPerPlantLimited(perPlant, limitedTimestamps) {
   return out;
 }
 
+// smallprod and prosumer are identical in both intraday and dayahead files
+// so we only take from intraday, falling back to dayahead if intraday is absent
 function combinePoints(typeMap, cat) {
-  const all = [];
-  for (const typeData of Object.values(typeMap)) {
-    if (typeData[cat]) all.push(...typeData[cat]);
-  }
-  return all;
+  const source = typeMap['intraday'] ?? typeMap['dayahead'];
+  if (!source) return [];
+  return source[cat] ?? [];
 }
 
 function combinePerPlant(typeMap) {
@@ -107,12 +105,10 @@ export default function App() {
     setProgress({ done: 0, total: 0, file: '' });
 
     try {
-      // 1. Parse all forecasts from ZIP
       const forecastData = await processZip(zipFile, (done, total, file) => {
         setProgress({ done, total, file });
       });
 
-      // 2. Parse real data
       let realData = {
         cef: {
           points: [], limitedTimestamps: new Set(),
@@ -126,23 +122,21 @@ export default function App() {
         realData = await parseRealDataFile(buf, realFile.name);
       }
 
-      const limitedTs        = realData.cef.limitedTimestamps;
-      const cefActual        = realData.cef.points;
-      const cefCapacity      = realData.cef.capacityMWhPerInterval ?? null;
+      const limitedTs         = realData.cef.limitedTimestamps;
+      const cefActual         = realData.cef.points;
+      const cefCapacity       = realData.cef.capacityMWhPerInterval ?? null;
       const cefActualPerPlant = realData.cef.perPlant ?? null;
       const capacityBySlug    = realData.cef.capacityBySlug ?? null;
-      const spActual         = realData.smallprod.points;
-      const prActual         = realData.prosumer.points;
+      const spActual          = realData.smallprod.points;
+      const prActual          = realData.prosumer.points;
 
-      // Pre-compute actual aggregations
-      const cefActualDaily   = computeDailyTotals(cefActual);
-      const cefActualHourly  = computeHourlyProfile(cefActual);
-      const spActualDaily    = computeDailyTotals(spActual);
-      const spActualHourly   = computeHourlyProfile(spActual);
-      const prActualDaily    = computeDailyTotals(prActual);
-      const prActualHourly   = computeHourlyProfile(prActual);
+      const cefActualDaily  = computeDailyTotals(cefActual);
+      const cefActualHourly = computeHourlyProfile(cefActual);
+      const spActualDaily   = computeDailyTotals(spActual);
+      const spActualHourly  = computeHourlyProfile(spActual);
+      const prActualDaily   = computeDailyTotals(prActual);
+      const prActualHourly  = computeHourlyProfile(prActual);
 
-      // 3. Build per-company results
       const out = {};
 
       for (const [company, types] of Object.entries(forecastData)) {
@@ -155,22 +149,22 @@ export default function App() {
           const raw = typeData.cef || [];
           const pts = filterLimited(raw, limitedTs);
           if (pts.length === 0) continue;
-          const dailyMets  = computeDailyMetrics(pts, cefActual, cefCapacity);
-          const dailyNmaes = Object.values(dailyMets).map(v => v.nmae).filter(v => v != null);
+          const dailyMets   = computeDailyMetrics(pts, cefActual, cefCapacity);
+          const dailyNmaes  = Object.values(dailyMets).map(v => v.nmae).filter(v => v != null);
           const averageNmae = dailyNmaes.length > 0
             ? dailyNmaes.reduce((s, v) => s + v, 0) / dailyNmaes.length
             : null;
           compOut[`${fType}_cef`] = {
-            daily:       mergeDailyData(cefActualDaily, computeDailyTotals(pts)),
-            hourly:      mergeHourlyData(cefActualHourly, computeHourlyProfile(pts)),
-            metrics:     computeMetrics(pts, cefActual, cefCapacity),
+            daily:        mergeDailyData(cefActualDaily, computeDailyTotals(pts)),
+            hourly:       mergeHourlyData(cefActualHourly, computeHourlyProfile(pts)),
+            metrics:      computeMetrics(pts, cefActual, cefCapacity),
             averageNmae,
             dailyMetrics: dailyMets,
-            pointCount:  pts.length,
+            pointCount:   pts.length,
           };
         }
 
-        // Small producers: combine all forecast types into one set of charts
+        // Small producers: take from intraday only (same data in both types)
         const spRaw = filterLimited(combinePoints(types, 'smallprod'), limitedTs);
         if (spRaw.length > 0) {
           compOut.smallprod = {
@@ -181,7 +175,7 @@ export default function App() {
           };
         }
 
-        // Prosumers: combine all forecast types
+        // Prosumers: take from intraday only (same data in both types)
         const prRaw = combinePoints(types, 'prosumer');
         if (prRaw.length > 0) {
           compOut.prosumer = {
@@ -195,7 +189,7 @@ export default function App() {
         if (Object.keys(compOut).length > 0) out[company] = compOut;
       }
 
-      // 4. Build leaderboards
+      // Leaderboards
       const lb = { intraday: [], dayahead: [], smallprod: [], prosumer: [] };
       for (const [company, data] of Object.entries(out)) {
         for (const fType of CEF_TYPES) {
@@ -211,7 +205,7 @@ export default function App() {
       }
       for (const key of Object.keys(lb)) lb[key].sort((a, b) => a.rmse - b.rmse);
 
-      // 5. Build aggregate chart data
+      // Aggregate chart data
       const nmaeByCompany = [];
       const rmseByCompany = [];
       const perIntervalByCompany = {};
@@ -228,7 +222,6 @@ export default function App() {
           company,
           rmse: metrics.reduce((s, m) => s + m.rmse, 0) / metrics.length,
         });
-        // Per-interval breakdown for dynamic chart controls
         const comp = {};
         for (const fType of CEF_TYPES) {
           const d = data[`${fType}_cef`];
@@ -245,8 +238,7 @@ export default function App() {
       nmaeByCompany.sort((a, b) => a.nmae - b.nmae);
       rmseByCompany.sort((a, b) => a.rmse - b.rmse);
 
-      // 6. Per-asset (per-plant) NMAE from forecast ZIP per-plant columns matched
-      //    against the benchmark CEF per-plant actuals.
+      // Per-asset NMAE
       let assetMetrics = null;
       if (cefActualPerPlant && capacityBySlug) {
         const byCompany = {};
@@ -263,7 +255,6 @@ export default function App() {
             const { nmae, n } = computeMetrics(fc, ac, capPerInterval);
             return { nmae, n };
           });
-          // Only record companies that have at least one plant with data
           if (plantRow.some(r => r.nmae != null)) byCompany[company] = plantRow;
         }
         assetMetrics = {
@@ -272,7 +263,7 @@ export default function App() {
         };
       }
 
-      // 7. Build daily NMAE ranking (CEF, intraday + day-ahead combined, 8 companies only)
+      // Daily NMAE ranking
       const DAILY_RANK_COS = COMPANY_ORDER.filter(c => !ANON_EXCLUDE.has(c));
       const dailyRankingRaw = {};
       for (const company of DAILY_RANK_COS) {
@@ -319,7 +310,6 @@ export default function App() {
 
   return (
     <div className="app">
-      {/* ── Header ── */}
       <header className="app-header">
         <h1 className="app-title">Energy Forecast Analyser</h1>
         <p className="app-subtitle">
@@ -327,7 +317,6 @@ export default function App() {
         </p>
       </header>
 
-      {/* ── Upload section ── */}
       <section className="upload-section">
         <div className="upload-grid">
           <div className="upload-col">
@@ -391,7 +380,7 @@ export default function App() {
         </div>
       )}
 
-      {/* ══ SECTION A: Non-anonymized aggregate charts ══ */}
+      {/* SECTION A: Non-anonymized */}
       {aggregateCharts && (
         <section className="aggregate-section">
           <div className="aggregate-section-header">
@@ -399,7 +388,6 @@ export default function App() {
             <p className="section-sub">Real company names · All 10 companies included</p>
           </div>
 
-          {/* Leaderboards */}
           {leaderboard && (
             <>
               <h3 className="subsection-heading">CEF Forecast Rankings</h3>
@@ -420,15 +408,12 @@ export default function App() {
             </>
           )}
 
-          {/* Aggregate bar charts */}
           <AggregateCharts data={aggregateCharts} anonymous={false} />
-
-          {/* Daily NMAE ranking table */}
           {dailyRanking && <DailyRankingTable dailyRanking={dailyRanking} />}
         </section>
       )}
 
-      {/* ══ SECTION B: Anonymized aggregate charts (no METEOLOGICA / OGRE) ══ */}
+      {/* SECTION B: Anonymized */}
       {aggregateCharts && (
         <section className="aggregate-section aggregate-section--anon">
           <div className="aggregate-section-header">
@@ -457,19 +442,16 @@ export default function App() {
           )}
 
           <AggregateCharts data={aggregateCharts} anonymous={true} />
-
-          {/* Anonymisation key + anonymised daily ranking table */}
           <CompanyCodeKey />
           {dailyRanking && <DailyRankingTable dailyRanking={dailyRanking} anonymous={true} />}
         </section>
       )}
 
-      {/* ── Per-company charts ── */}
+      {/* Per-company charts */}
       {sortedCompanies.map(company => (
         <section key={company} className="company-section">
           <h2 className="company-title">{company}</h2>
 
-          {/* CEF: intraday + day-ahead */}
           {CEF_TYPES.filter(t => results[company][`${t}_cef`]).map(fType => {
             const d = results[company][`${fType}_cef`];
             return (
@@ -491,13 +473,12 @@ export default function App() {
             );
           })}
 
-          {/* Small Producers */}
           {results[company].smallprod && (() => {
             const d = results[company].smallprod;
             return (
               <div className="forecast-type-block forecast-type-block--smallprod">
                 <div className="type-badge type-badge--smallprod">
-                  Mici Producatori
+                  MICI PRODUCATORI
                   <span className="type-badge-count">{d.pointCount.toLocaleString()} pts</span>
                   {d.metrics?.rmse != null && (
                     <span className="type-badge-metric">
@@ -513,13 +494,12 @@ export default function App() {
             );
           })()}
 
-          {/* Prosumers */}
           {results[company].prosumer && (() => {
             const d = results[company].prosumer;
             return (
               <div className="forecast-type-block forecast-type-block--prosumer">
                 <div className="type-badge type-badge--prosumer">
-                  Prosumatori
+                  PROSUMATORI
                   <span className="type-badge-count">{d.pointCount.toLocaleString()} pts</span>
                   {d.metrics?.rmse != null && (
                     <span className="type-badge-metric">
